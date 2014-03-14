@@ -2207,8 +2207,92 @@ dump_cachefile(const char *cachefile)
 
 #define	ZDB_MAX_UB_HEADER_SIZE 32
 
+/*
+ * XXX: This potentially could be simplified to call zio_checksum_error()
+ * to validate the given block.
+ */
+
 static void
-dump_label_uberblocks(vdev_label_t *lbl, uint64_t ashift)
+zio_checksum_label_verifier(zio_cksum_t *zcp, uint64_t offset)
+{
+	ZIO_SET_CHECKSUM(zcp, offset, 0, 0, 0);
+}
+
+static void
+block_verify_checksum(const char *dev, const char *suffix, void *data,
+    uint64_t size, uint64_t offset)
+{
+	zio_checksum_info_t *ci = &zio_checksum_table[ZIO_CHECKSUM_LABEL];
+	zio_cksum_t expected_cksum;
+	zio_cksum_t actual_cksum;
+	zio_cksum_t verifier;
+	zio_eck_t *eck;
+	char actual_cksum_path[1024];
+	int byteswap;
+
+	eck = (zio_eck_t *)((char *)data + size) - 1;
+
+	if ((eck->zec_magic != ZEC_MAGIC) &&
+	    (eck->zec_magic != BSWAP_64(ZEC_MAGIC)))
+		(void) printf("Config label magic %llx != %llx\n",
+		    (u_longlong_t)eck->zec_magic, ZEC_MAGIC);
+
+	byteswap = (eck->zec_magic == BSWAP_64(ZEC_MAGIC));
+	zio_checksum_label_verifier(&verifier, offset);
+
+	if (byteswap)
+		byteswap_uint64_array(&verifier, sizeof (zio_cksum_t));
+
+	expected_cksum = eck->zec_cksum;
+	eck->zec_cksum = verifier;
+	ci->ci_func[byteswap](data, size, &actual_cksum);
+
+	if (byteswap)
+		byteswap_uint64_array(&expected_cksum,
+		    sizeof (zio_cksum_t));
+
+	if (!ZIO_CHECKSUM_EQUAL(actual_cksum, expected_cksum)) {
+		ssize_t len;
+		int fd;
+
+		(void) printf("Expected Cksum: %016llx %016llx %016llx %016llx\n",
+		    (u_longlong_t)expected_cksum.zc_word[0],
+		    (u_longlong_t)expected_cksum.zc_word[1],
+		    (u_longlong_t)expected_cksum.zc_word[2],
+		    (u_longlong_t)expected_cksum.zc_word[3]);
+		(void) printf("Actual Cksum:   %016llx %016llx %016llx %016llx\n",
+		    (u_longlong_t)actual_cksum.zc_word[0],
+		    (u_longlong_t)actual_cksum.zc_word[1],
+		    (u_longlong_t)actual_cksum.zc_word[2],
+		    (u_longlong_t)actual_cksum.zc_word[3]);
+
+		sprintf(actual_cksum_path, "%s.%s.%llu.actual.cksum",
+		    dev, suffix, (u_longlong_t)offset);
+
+		(void) printf("Writing actual checksum for offset 0x%x:\n%s\n",
+		    (int)offset, actual_cksum_path);
+		fd = open(actual_cksum_path, O_CREAT|O_WRONLY|O_TRUNC, 0644);
+		if (fd != -1) {
+			/*
+			 * This must be handled for a real production version
+			 * of this code, but for now can be ignored.
+			 */
+			VERIFY3S(byteswap, ==, 0);
+
+			len = write(fd, &actual_cksum, sizeof (zio_cksum_t));
+			if (len == -1)
+				(void) printf("fd=%d errno=%d\n", fd, errno);
+			else
+				VERIFY3S(len, ==, sizeof (zio_cksum_t));
+
+			close(fd);
+		}
+	}
+}
+
+
+static void
+dump_label_uberblocks(const char *path, vdev_label_t *lbl, uint64_t ashift)
 {
 	vdev_t vd;
 	vdev_t *vdp = &vd;
@@ -2227,6 +2311,10 @@ dump_label_uberblocks(vdev_label_t *lbl, uint64_t ashift)
 		(void) snprintf(header, ZDB_MAX_UB_HEADER_SIZE,
 		    "Uberblock[%d]\n", i);
 		dump_uberblock(ub, header, "");
+
+		block_verify_checksum(path, "uberblock", ub,
+		    vdev_label_offset(0, 0, VDEV_UBERBLOCK_SIZE(&vd)),
+		    VDEV_UBERBLOCK_OFFSET(&vd, i));
 	}
 }
 
@@ -2429,8 +2517,13 @@ dump_label(const char *dev)
 			nvlist_free(config);
 			label_found = B_TRUE;
 		}
-		if (dump_opt['u'])
-			dump_label_uberblocks(&label, ashift);
+		if (dump_opt['u'] && (l == 0))
+			dump_label_uberblocks(path, &label, ashift);
+
+		/* XXX: Use proper constants from the code */
+		if (l == 0)
+			block_verify_checksum(path, "nvlist", buf, 112 * 1024,
+			    vdev_label_offset(psize, l, 0) + 16 * 1024);
 	}
 
 	(void) close(fd);
