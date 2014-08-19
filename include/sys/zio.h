@@ -374,6 +374,16 @@ typedef int zio_pipe_stage_t(zio_t *zio);
 #define	ZIO_REEXECUTE_NOW	0x01
 #define	ZIO_REEXECUTE_SUSPEND	0x02
 
+/*
+ * The possible lock-subclasses for the io_lock.  This is required by the
+ * runtime locking correctness validator to make the lock ordering explicit.
+ */
+enum zio_mutex_lock_class {
+	ZIO_MUTEX_NORMAL,
+	ZIO_MUTEX_PARENT,
+	ZIO_MUTEX_CHILD,
+};
+
 typedef struct zio_link {
 	zio_t		*zl_parent;
 	zio_t		*zl_child;

@@ -361,11 +361,16 @@ zio_decompress(zio_t *zio, void *data, uint64_t size)
 zio_t *
 zio_walk_parents(zio_t *cio)
 {
-	zio_link_t *zl = cio->io_walk_link;
-	list_t *pl = &cio->io_parent_list;
+	zio_link_t *zl;
 
-	zl = (zl == NULL) ? list_head(pl) : list_next(pl, zl);
+	mutex_enter(&cio->io_lock);
+	if (cio->io_walk_link == NULL)
+		zl = list_head(&cio->io_parent_list);
+	else
+		zl = list_next(&cio->io_parent_list, cio->io_walk_link);
+
 	cio->io_walk_link = zl;
+	mutex_exit(&cio->io_lock);
 
 	if (zl == NULL)
 		return (NULL);
@@ -377,11 +382,16 @@ zio_walk_parents(zio_t *cio)
 zio_t *
 zio_walk_children(zio_t *pio)
 {
-	zio_link_t *zl = pio->io_walk_link;
-	list_t *cl = &pio->io_child_list;
+	zio_link_t *zl;
 
-	zl = (zl == NULL) ? list_head(cl) : list_next(cl, zl);
+	mutex_enter(&pio->io_lock);
+	if (pio->io_walk_link == NULL)
+		zl = list_head(&pio->io_child_list);
+	else
+		zl = list_next(&pio->io_child_list, pio->io_walk_link);
+
 	pio->io_walk_link = zl;
+	mutex_exit(&pio->io_lock);
 
 	if (zl == NULL)
 		return (NULL);
@@ -416,8 +426,8 @@ zio_add_child(zio_t *pio, zio_t *cio)
 	zl->zl_parent = pio;
 	zl->zl_child = cio;
 
-	mutex_enter(&cio->io_lock);
-	mutex_enter(&pio->io_lock);
+	mutex_enter_nested(&cio->io_lock, ZIO_MUTEX_CHILD);
+	mutex_enter_nested(&pio->io_lock, ZIO_MUTEX_PARENT);
 
 	ASSERT(pio->io_state[ZIO_WAIT_DONE] == 0);
 
@@ -595,6 +605,9 @@ zio_create(zio_t *pio, spa_t *spa, uint64_t txg, const blkptr_t *bp,
 static void
 zio_destroy(zio_t *zio)
 {
+	ASSERT0(zio->io_child_count);
+	ASSERT0(zio->io_parent_count);
+
 	list_destroy(&zio->io_parent_list);
 	list_destroy(&zio->io_child_list);
 	mutex_destroy(&zio->io_lock);
@@ -704,10 +717,12 @@ zio_write_override(zio_t *zio, blkptr_t *bp, int copies, boolean_t nopwrite)
 	 * when the bp was first written by dmu_sync() keeping in mind
 	 * that nopwrite and dedup are mutually exclusive.
 	 */
+	mutex_enter(&zio->io_lock);
 	zio->io_prop.zp_dedup = nopwrite ? B_FALSE : zio->io_prop.zp_dedup;
 	zio->io_prop.zp_nopwrite = nopwrite;
 	zio->io_prop.zp_copies = copies;
 	zio->io_bp_override = bp;
+	mutex_exit(&zio->io_lock);
 }
 
 void
@@ -1320,7 +1335,9 @@ __attribute__((always_inline))
 static inline void
 __zio_execute(zio_t *zio)
 {
+	mutex_enter(&zio->io_lock);
 	zio->io_executor = curthread;
+	mutex_exit(&zio->io_lock);
 
 	while (zio->io_stage < ZIO_STAGE_DONE) {
 		enum zio_stage pipeline = zio->io_pipeline;
@@ -1397,7 +1414,9 @@ zio_wait(zio_t *zio)
 	ASSERT(zio->io_stage == ZIO_STAGE_OPEN);
 	ASSERT(zio->io_executor == NULL);
 
+	mutex_enter(&zio->io_lock);
 	zio->io_waiter = curthread;
+	mutex_exit(&zio->io_lock);
 
 	__zio_execute(zio);
 
@@ -3256,12 +3275,13 @@ zio_done(zio_t *zio)
 		zio_notify_parent(pio, zio, ZIO_WAIT_DONE);
 	}
 
+	mutex_enter(&zio->io_lock);
 	if (zio->io_waiter != NULL) {
-		mutex_enter(&zio->io_lock);
 		zio->io_executor = NULL;
 		cv_broadcast(&zio->io_cv);
 		mutex_exit(&zio->io_lock);
 	} else {
+		mutex_exit(&zio->io_lock);
 		zio_destroy(zio);
 	}
 
