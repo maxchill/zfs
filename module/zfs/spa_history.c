@@ -306,7 +306,8 @@ spa_history_log_nvl(spa_t *spa, nvlist_t *nvl)
 	dmu_tx_t *tx;
 	nvlist_t *nvarg;
 
-	if (spa_version(spa) < SPA_VERSION_ZPOOL_HISTORY || !spa_writeable(spa))
+	if (spa_version(spa) < SPA_VERSION_ZPOOL_HISTORY ||
+	    !spa_writeable(spa) || spa_suspended(spa))
 		return (SET_ERROR(EINVAL));
 
 	tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
