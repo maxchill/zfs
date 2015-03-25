@@ -902,6 +902,8 @@ dbuf_free_range(dnode_t *dn, uint64_t start, uint64_t end, dmu_tx_t *tx)
 			continue;
 		if ((db->db_blkid < start || db->db_blkid > end) && !freespill)
 			continue;
+		if (freespill && db->db_blkid != DMU_SPILL_BLKID)
+			continue;
 
 		/* found a level 0 buffer in the range */
 		mutex_enter(&db->db_mtx);
