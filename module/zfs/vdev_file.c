@@ -242,8 +242,8 @@ vdev_ops_t vdev_file_ops = {
 void
 vdev_file_init(void)
 {
-	vdev_file_taskq = taskq_create("vdev_file_taskq", 100, minclsyspri,
-	    max_ncpus, INT_MAX, TASKQ_PREPOPULATE | TASKQ_THREADS_CPU_PCT);
+	vdev_file_taskq = taskq_create("vdev_file_taskq", max_ncpus,
+	    minclsyspri, max_ncpus, INT_MAX, TASKQ_PREPOPULATE | TASKQ_DYNAMIC);
 
 	VERIFY(vdev_file_taskq);
 }
