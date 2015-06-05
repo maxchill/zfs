@@ -1073,6 +1073,49 @@ zfs_root(zfs_sb_t *zsb, struct inode **ipp)
 }
 EXPORT_SYMBOL(zfs_root);
 
+#if !defined(HAVE_SHRINK) && !defined(HAVE_SPLIT_SHRINKER_CALLBACK)
+/*
+ * Linux kernels older than 3.1 do not support a per-filesystem shrinker.
+ * To accomodate this we must improvise and manually walk the list of znodes
+ * attempting to prune dentries in order to be able to drop the inodes.
+ * To avoid scanning the same znodes multiple times they are moved to the
+ * end of the list which new znodes are inserted.
+ */
+static int
+zfs_sb_prune_compat(zfs_sb_t *zsb, unsigned long nr_to_scan)
+{
+	znode_t *zp;
+	struct inode *ip;
+	int objects = 0, i = 0;
+
+	mutex_enter(&zsb->z_znodes_lock);
+	while ((zp = list_head(&zsb->z_all_znodes)) != NULL) {
+
+		if (i++ > nr_to_scan)
+			break;
+
+		list_remove(&zsb->z_all_znodes, zp);
+		list_insert_tail(&zsb->z_all_znodes, zp);
+
+		ip = igrab(ZTOI(zp));
+		if (ip == NULL)
+			continue;
+
+		d_prune_aliases(ip);
+
+		if (atomic_read(&ip->i_count) == 1)
+			objects++;
+
+		zfs_iput_async(ip);
+	}
+	mutex_exit(&zsb->z_znodes_lock);
+
+	taskq_wait_outstanding(zfs_iput_taskq(zsb), 0);
+
+	return (objects);
+}
+#endif
+
 /*
  * The ARC has requested that the filesystem drop entries from the dentry
  * and inode caches.  This can occur when the ARC needs to free meta data
@@ -1098,17 +1141,7 @@ zfs_sb_prune(struct super_block *sb, unsigned long nr_to_scan, int *objects)
 #elif defined(HAVE_SHRINK)
 	*objects = (*shrinker->shrink)(shrinker, &sc);
 #else
-	/*
-	 * Linux kernels older than 3.1 do not support a per-filesystem
-	 * shrinker.  Therefore, we must fall back to the only available
-	 * interface which is to discard all unused dentries and inodes.
-	 * This behavior clearly isn't ideal but it's required so the ARC
-	 * may free memory.  The performance impact is mitigated by the
-	 * fact that the frequently accessed dentry and inode buffers will
-	 * still be in the ARC making them relatively cheap to recreate.
-	 */
-	*objects = 0;
-	shrink_dcache_parent(sb->s_root);
+	*objects = zfs_sb_prune_compat(zsb, nr_to_scan);
 #endif
 	ZFS_EXIT(zsb);
 

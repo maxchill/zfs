@@ -918,16 +918,28 @@ zfs_write(struct inode *ip, uio_t *uio, int ioflag, cred_t *cr)
 }
 EXPORT_SYMBOL(zfs_write);
 
+/*
+ * Returns a pointer to the iput taskq for a filesystem.
+ */
+taskq_t *
+zfs_iput_taskq(zfs_sb_t *zsb)
+{
+	return (dsl_pool_iput_taskq(dmu_objset_pool(zsb->z_os)));
+}
+
+/*
+ * Calls iput() for the passed inode asynchronosly.  This is helpful when
+ * it's not safe to call iput_final() is the given context due locks
+ * which may be held and cannoy be easily dropped.
+ */
 void
 zfs_iput_async(struct inode *ip)
 {
-	objset_t *os = ITOZSB(ip)->z_os;
-
 	ASSERT(atomic_read(&ip->i_count) > 0);
-	ASSERT(os != NULL);
+	ASSERT(ITOZSB(ip)->z_os != NULL);
 
 	if (atomic_read(&ip->i_count) == 1)
-		taskq_dispatch(dsl_pool_iput_taskq(dmu_objset_pool(os)),
+		taskq_dispatch(zfs_iput_taskq(ITOZSB(ip)),
 		    (task_func_t *)iput, ip, TQ_SLEEP);
 	else
 		iput(ip);

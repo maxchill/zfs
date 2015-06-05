@@ -31,6 +31,7 @@
 #include <sys/cred.h>
 #include <sys/fcntl.h>
 #include <sys/pathname.h>
+#include <sys/zfs_vfsops.h>
 #include <sys/zpl.h>
 
 #ifdef	__cplusplus
@@ -79,6 +80,7 @@ extern int zfs_putpage(struct inode *ip, struct page *pp,
 extern int zfs_dirty_inode(struct inode *ip, int flags);
 extern int zfs_map(struct inode *ip, offset_t off, caddr_t *addrp,
     size_t len, unsigned long vm_flags);
+extern taskq_t *zfs_iput_taskq(zfs_sb_t *zsb);
 extern void zfs_iput_async(struct inode *ip);
 
 #ifdef	__cplusplus
