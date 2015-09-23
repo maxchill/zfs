@@ -948,62 +948,42 @@ zvol_first_open(zvol_state_t *zv)
 {
 	objset_t *os;
 	uint64_t volsize;
-	int locked = 0;
 	int error;
-	uint64_t ro;
-
-	/*
-	 * In all other cases the spa_namespace_lock is taken before the
-	 * bdev->bd_mutex lock.  But in this case the Linux __blkdev_get()
-	 * function calls fops->open() with the bdev->bd_mutex lock held.
-	 *
-	 * To avoid a potential lock inversion deadlock we preemptively
-	 * try to take the spa_namespace_lock().  Normally it will not
-	 * be contended and this is safe because spa_open_common() handles
-	 * the case where the caller already holds the spa_namespace_lock.
-	 *
-	 * When it is contended we risk a lock inversion if we were to
-	 * block waiting for the lock.  Luckily, the __blkdev_get()
-	 * function allows us to return -ERESTARTSYS which will result in
-	 * bdev->bd_mutex being dropped, reacquired, and fops->open() being
-	 * called again.  This process can be repeated safely until both
-	 * locks are acquired.
-	 */
-	if (!mutex_owned(&spa_namespace_lock)) {
-		locked = mutex_tryenter(&spa_namespace_lock);
-		if (!locked)
-			return (-SET_ERROR(ERESTARTSYS));
-	}
-
-	error = dsl_prop_get_integer(zv->zv_name, "readonly", &ro, NULL);
-	if (error)
-		goto out_mutex;
+	uint64_t readonly;
 
 	/* lie and say we're read-only */
-	error = dmu_objset_own(zv->zv_name, DMU_OST_ZVOL, 1, zvol_tag, &os);
+	error = dmu_objset_own(zv->zv_name, DMU_OST_ZVOL, B_TRUE,
+	    zvol_tag, &os);
 	if (error)
-		goto out_mutex;
+		return (SET_ERROR(-error));
+
+	zv->zv_objset = os;
+	error = dsl_prop_get_integer(zv->zv_name, "readonly", &readonly, NULL);
+	if (error) {
+		dmu_objset_disown(os, zvol_tag);
+		zv->zv_objset = NULL;
+		return (SET_ERROR(-error));
+	}
 
 	error = zap_lookup(os, ZVOL_ZAP_OBJ, "size", 8, 1, &volsize);
 	if (error) {
 		dmu_objset_disown(os, zvol_tag);
 		zv->zv_objset = NULL;
-		goto out_mutex;
+		return (SET_ERROR(-error));
 	}
 
-	zv->zv_objset = os;
 	error = dmu_bonus_hold(os, ZVOL_OBJ, zvol_tag, &zv->zv_dbuf);
 	if (error) {
 		dmu_objset_disown(os, zvol_tag);
 		zv->zv_objset = NULL;
-		goto out_mutex;
+		return (SET_ERROR(-error));
 	}
 
 	set_capacity(zv->zv_disk, volsize >> 9);
 	zv->zv_volsize = volsize;
 	zv->zv_zilog = zil_open(os, zvol_get_data);
 
-	if (ro || dmu_objset_is_snapshot(os) ||
+	if (readonly || dmu_objset_is_snapshot(os) ||
 	    !spa_writeable(dmu_objset_spa(os))) {
 		set_disk_ro(zv->zv_disk, 1);
 		zv->zv_flags |= ZVOL_RDONLY;
@@ -1011,10 +991,6 @@ zvol_first_open(zvol_state_t *zv)
 		set_disk_ro(zv->zv_disk, 0);
 		zv->zv_flags &= ~ZVOL_RDONLY;
 	}
-
-out_mutex:
-	if (locked)
-		mutex_exit(&spa_namespace_lock);
 
 	return (SET_ERROR(-error));
 }
@@ -1044,45 +1020,24 @@ static int
 zvol_open(struct block_device *bdev, fmode_t flag)
 {
 	zvol_state_t *zv = bdev->bd_disk->private_data;
-	int error = 0, drop_mutex = 0;
+	int error = 0;
 
-	/*
-	 * If the caller is already holding the mutex do not take it
-	 * again, this will happen as part of zvol_create_minor_impl().
-	 * Once add_disk() is called the device is live and the kernel
-	 * will attempt to open it to read the partition information.
-	 */
-	if (!mutex_owned(&zvol_state_lock)) {
-		mutex_enter(&zvol_state_lock);
-		drop_mutex = 1;
-	}
-
+	/* mutex_is_locked(&bdev->bd_mutex) */
 	ASSERT3P(zv, !=, NULL);
+
+	if ((flag & FMODE_WRITE) && (zv->zv_flags & ZVOL_RDONLY))
+		return (SET_ERROR(-EROFS));
 
 	if (zv->zv_open_count == 0) {
 		error = zvol_first_open(zv);
 		if (error)
-			goto out_mutex;
-	}
-
-	if ((flag & FMODE_WRITE) && (zv->zv_flags & ZVOL_RDONLY)) {
-		error = -EROFS;
-		goto out_open_count;
+			return (SET_ERROR(error));
 	}
 
 	zv->zv_open_count++;
-
-out_open_count:
-	if (zv->zv_open_count == 0)
-		zvol_last_close(zv);
-
-out_mutex:
-	if (drop_mutex)
-		mutex_exit(&zvol_state_lock);
-
 	check_disk_change(bdev);
 
-	return (SET_ERROR(error));
+	return (0);
 }
 
 #ifdef HAVE_BLOCK_DEVICE_OPERATIONS_RELEASE_VOID
@@ -1093,21 +1048,15 @@ static int
 zvol_release(struct gendisk *disk, fmode_t mode)
 {
 	zvol_state_t *zv = disk->private_data;
-	int drop_mutex = 0;
 
-	if (!mutex_owned(&zvol_state_lock)) {
-		mutex_enter(&zvol_state_lock);
-		drop_mutex = 1;
-	}
+	/* mutex_is_locked(&bdev->bd_mutex) */
+	ASSERT3P(zv, !=, NULL);
 
 	if (zv->zv_open_count > 0) {
 		zv->zv_open_count--;
 		if (zv->zv_open_count == 0)
 			zvol_last_close(zv);
 	}
-
-	if (drop_mutex)
-		mutex_exit(&zvol_state_lock);
 
 #ifndef HAVE_BLOCK_DEVICE_OPERATIONS_RELEASE_VOID
 	return (0);
@@ -1447,7 +1396,9 @@ out:
 
 	if (error == 0) {
 		zvol_insert(zv);
+		mutex_exit(&zvol_state_lock);
 		add_disk(zv->zv_disk);
+		mutex_enter(&zvol_state_lock);
 	}
 
 	mutex_exit(&zvol_state_lock);
@@ -1788,12 +1739,15 @@ zvol_task_cb(void *param)
 
 	switch (task->op) {
 	case ZVOL_ASYNC_CREATE_MINORS:
+		printk("CREATE: %s\n", task->name1);
 		(void) zvol_create_minors_impl(task->name1);
 		break;
 	case ZVOL_ASYNC_REMOVE_MINORS:
+		printk("REMOVE: %s\n", task->name1);
 		zvol_remove_minors_impl(task->name1);
 		break;
 	case ZVOL_ASYNC_RENAME_MINORS:
+		printk("RENAME: %s -> %s\n", task->name1, task->name2);
 		zvol_rename_minors_impl(task->name1, task->name2);
 		break;
 	default:
