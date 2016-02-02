@@ -58,28 +58,39 @@ unsigned int zvol_major = ZVOL_MAJOR;
 unsigned int zvol_prefetch_bytes = (128 * 1024);
 unsigned long zvol_max_discard_blocks = 16384;
 
-static kmutex_t zvol_state_lock;
-static list_t zvol_state_list;
+static avl_tree_t zvol_tree_by_name;	/* tree of zvols sorted by name */
+static avl_tree_t zvol_tree_by_dev;	/* tree of zvols sorted by dev */
+static list_t zvol_list;		/* list of zvols sorted by minor */
+static krwlock_t zvol_lock;		/* protects zvol_tree_* and zvol_list */
 static char *zvol_tag = "zvol_tag";
 
 /*
  * The in-core state of each volume.
  */
 typedef struct zvol_state {
-	char			zv_name[MAXNAMELEN];	/* name */
-	uint64_t		zv_volsize;		/* advertised space */
-	uint64_t		zv_volblocksize;	/* volume block size */
-	objset_t		*zv_objset;	/* objset handle */
-	uint32_t		zv_flags;	/* ZVOL_* flags */
-	uint32_t		zv_open_count;	/* open counts */
-	uint32_t		zv_changed;	/* disk changed */
+	/* Immutable */
 	zilog_t			*zv_zilog;	/* ZIL handle */
 	znode_t			zv_znode;	/* for range locking */
 	dmu_buf_t		*zv_dbuf;	/* bonus handle */
 	dev_t			zv_dev;		/* device id */
 	struct gendisk		*zv_disk;	/* generic disk */
 	struct request_queue	*zv_queue;	/* request queue */
-	list_node_t		zv_next;	/* next zvol_state_t linkage */
+
+	/* Protected by zv_lock */
+	kmutex_t		zv_lock;	/* protects this structure */
+	char			*zv_name;	/* name */
+	objset_t		*zv_objset;	/* objset handle */
+	uint64_t		zv_volsize;	/* advertised space */
+	uint64_t		zv_volblocksize; /* volume block size */
+	uint32_t		zv_flags;	/* ZVOL_* flags */
+	uint32_t		zv_open_count;	/* open counts */
+	uint32_t		zv_changed;	/* disk changed */
+
+	/* Linkages and references */
+	avl_node_t		zv_node_name;	/* zvol_tree_by_name linkage */
+	avl_node_t		zv_node_dev;	/* zvol_tree_by_dev linkage */
+	list_node_t		zv_node_list;	/* zvol_list  linkage */
+	refcount_t		zv_refcount;	/* reference count */
 } zvol_state_t;
 
 typedef enum {
@@ -99,8 +110,29 @@ typedef struct {
 #define	ZVOL_RDONLY	0x1
 
 /*
+ * Hold a reference on the zvol_state_t.
+ */
+static void
+zvol_hold(zvol_state_t *zv)
+{
+	refcount_add(&zv->zv_refcount, NULL);
+}
+
+
+/*
+ * Release a reference on the zfs_state_t.  When the number of
+ * references drops to zero the structure will be freed.
+ */
+static void
+zvol_rele(zvol_state_t *zv)
+{
+	if (refcount_remove(&zv->zv_refcount, NULL) == 0)
+		zvol_free(zv);
+}
+
+/*
  * Find the next available range of ZVOL_MINORS minor numbers.  The
- * zvol_state_list is kept in ascending minor order so we simply need
+ * zvol_list is kept in ascending minor order so we simply need
  * to scan the list for the first gap in the sequence.  This allows us
  * to recycle minor number as devices are created and removed.
  */
@@ -110,9 +142,9 @@ zvol_find_minor(unsigned *minor)
 	zvol_state_t *zv;
 
 	*minor = 0;
-	ASSERT(MUTEX_HELD(&zvol_state_lock));
-	for (zv = list_head(&zvol_state_list); zv != NULL;
-	    zv = list_next(&zvol_state_list, zv), *minor += ZVOL_MINORS) {
+	ASSERT(RW_LOCK_HELD(&zvol_lock));
+	for (zv = list_head(&zvol_list); zv != NULL;
+	    zv = list_next(&zvol_list, zv), *minor += ZVOL_MINORS) {
 		if (MINOR(zv->zv_dev) != MINOR(*minor))
 			break;
 	}
@@ -125,21 +157,57 @@ zvol_find_minor(unsigned *minor)
 }
 
 /*
+ * zvol_state_t comparison function zvol_tree_by_dev.
+ */
+static int
+zvol_compare_by_dev(const void *a, const void *b)
+{
+	const zvol_state_t *zv_a = a;
+	const zvol_state_t *zv_b = b;
+
+	if (zv_a->zv_dev < zv_b->zv_dev)
+		return (-1);
+	else if (zv_a->zv_dev > zv_b->zv_dev)
+		return (1);
+	else
+		return (0);
+}
+
+/*
  * Find a zvol_state_t given the full major+minor dev_t.
  */
 static zvol_state_t *
 zvol_find_by_dev(dev_t dev)
 {
-	zvol_state_t *zv;
+	zvol_state_t *zv, search;
 
-	ASSERT(MUTEX_HELD(&zvol_state_lock));
-	for (zv = list_head(&zvol_state_list); zv != NULL;
-	    zv = list_next(&zvol_state_list, zv)) {
-		if (zv->zv_dev == dev)
-			return (zv);
-	}
+	ASSERT(RW_LOCK_HELD(&zvol_lock));
 
-	return (NULL);
+	search.zv_dev = dev;
+	zv = avl_find(&zvol_tree_by_dev, &search, NULL);
+	if (zv)
+		refcount_add(&zv->zv_refcount, NULL);
+
+	return (zv);
+}
+
+/*
+ * zvol_state_t comparison function zvol_tree_by_name.
+ */
+static int
+zvol_compare_by_name(const void *a, const void *b)
+{
+	const zvol_state_t *zv_a = a;
+	const zvol_state_t *zv_b = b;
+	int ret;
+
+        ret = strcmp(zv_a->zv_name, zv_b->zv_name);
+	if (ret < 0)
+		return (-1);
+	else if (ret > 0)
+		return (1);
+	else
+		return (0);
 }
 
 /*
@@ -148,18 +216,17 @@ zvol_find_by_dev(dev_t dev)
 static zvol_state_t *
 zvol_find_by_name(const char *name)
 {
-	zvol_state_t *zv;
+	zvol_state_t *zv, search;
 
-	ASSERT(MUTEX_HELD(&zvol_state_lock));
-	for (zv = list_head(&zvol_state_list); zv != NULL;
-	    zv = list_next(&zvol_state_list, zv)) {
-		if (strncmp(zv->zv_name, name, MAXNAMELEN) == 0)
-			return (zv);
-	}
+	ASSERT(RW_LOCK_HELD(&zvol_lock));
 
-	return (NULL);
+	search.zv_name = (char *) name;
+	zv = avl_find(&zvol_tree_by_name, &search, NULL);
+	if (zv)
+		refcount_add(&zv->zv_refcount, NULL);
+
+	return (zv);
 }
-
 
 /*
  * Given a path, return TRUE if path is a ZVOL.
@@ -292,8 +359,6 @@ zvol_update_volsize(uint64_t volsize, objset_t *os)
 	dmu_tx_t *tx;
 	int error;
 
-	ASSERT(MUTEX_HELD(&zvol_state_lock));
-
 	tx = dmu_tx_create(os);
 	dmu_tx_hold_zap(tx, ZVOL_ZAP_OBJ, TRUE, NULL);
 	dmu_tx_mark_netfree(tx);
@@ -348,15 +413,16 @@ zvol_set_volsize(const char *name, uint64_t volsize)
 	if (readonly)
 		return (SET_ERROR(EROFS));
 
-	mutex_enter(&zvol_state_lock);
+	rw_enter(&zvol_lock, RW_READER);
 	zv = zvol_find_by_name(name);
+	if (zv != NULL)
+		mutex_enter(&zv->zv_lock);
+	rw_exit(&zvol_lock);
 
 	if (zv == NULL || zv->zv_objset == NULL) {
-		if ((error = dmu_objset_own(name, DMU_OST_ZVOL, B_FALSE,
-		    FTAG, &os)) != 0) {
-			mutex_exit(&zvol_state_lock);
-			return (SET_ERROR(error));
-		}
+		error = dmu_objset_own(name, DMU_OST_ZVOL, B_FALSE, FTAG, &os);
+		if (error)
+			goto out;
 		owned = B_TRUE;
 		if (zv != NULL)
 			zv->zv_objset = os;
@@ -381,7 +447,12 @@ out:
 		if (zv != NULL)
 			zv->zv_objset = NULL;
 	}
-	mutex_exit(&zvol_state_lock);
+
+	if (zv != NULL) {
+		mutex_exit(&zv->zv_exit);
+		zvol_rele(zv);
+	}
+
 	return (error);
 }
 
@@ -432,13 +503,12 @@ zvol_set_volblocksize(const char *name, uint64_t volblocksize)
 	dmu_tx_t *tx;
 	int error;
 
-	mutex_enter(&zvol_state_lock);
-
+	rw_enter(&zvol_lock, RW_READER);
 	zv = zvol_find_by_name(name);
-	if (zv == NULL) {
-		error = SET_ERROR(ENXIO);
-		goto out;
-	}
+	rw_exit(&zvol_lock);
+
+	if (zv == NULL)
+		return (SET_ERROR(ENXIO));
 
 	if (zv->zv_flags & ZVOL_RDONLY) {
 		error = SET_ERROR(EROFS);
@@ -460,9 +530,9 @@ zvol_set_volblocksize(const char *name, uint64_t volblocksize)
 			zv->zv_volblocksize = volblocksize;
 	}
 out:
-	mutex_exit(&zvol_state_lock);
+	rw_exit(&zvol_lock);
 
-	return (SET_ERROR(error));
+	return (error);
 }
 
 /*
@@ -922,15 +992,15 @@ zvol_insert(zvol_state_t *zv_insert)
 {
 	zvol_state_t *zv = NULL;
 
-	ASSERT(MUTEX_HELD(&zvol_state_lock));
+	ASSERT(MUTEX_HELD(&zvol_lock));
 	ASSERT3U(MINOR(zv_insert->zv_dev) & ZVOL_MINOR_MASK, ==, 0);
-	for (zv = list_head(&zvol_state_list); zv != NULL;
-	    zv = list_next(&zvol_state_list, zv)) {
+	for (zv = list_head(&zvol_list); zv != NULL;
+	    zv = list_next(&zvol_list, zv)) {
 		if (MINOR(zv->zv_dev) > MINOR(zv_insert->zv_dev))
 			break;
 	}
 
-	list_insert_before(&zvol_state_list, zv, zv_insert);
+	list_insert_before(&zvol_list, zv, zv_insert);
 }
 
 /*
@@ -939,8 +1009,8 @@ zvol_insert(zvol_state_t *zv_insert)
 static void
 zvol_remove(zvol_state_t *zv_remove)
 {
-	ASSERT(MUTEX_HELD(&zvol_state_lock));
-	list_remove(&zvol_state_list, zv_remove);
+	ASSERT(MUTEX_HELD(&zvol_lock));
+	list_remove(&zvol_list, zv_remove);
 }
 
 static int
@@ -1150,10 +1220,10 @@ zvol_probe(dev_t dev, int *part, void *arg)
 	zvol_state_t *zv;
 	struct kobject *kobj;
 
-	mutex_enter(&zvol_state_lock);
+	mutex_enter(&zvol_lock);
 	zv = zvol_find_by_dev(dev);
 	kobj = zv ? get_disk(zv->zv_disk) : NULL;
-	mutex_exit(&zvol_state_lock);
+	mutex_exit(&zvol_lock);
 
 	return (kobj);
 }
@@ -1232,7 +1302,7 @@ zvol_alloc(dev_t dev, const char *name)
 
 	zv = kmem_zalloc(sizeof (zvol_state_t), KM_SLEEP);
 
-	list_link_init(&zv->zv_next);
+	list_link_init(&zv->zv_node_list);
 
 	zv->zv_queue = blk_alloc_queue(GFP_ATOMIC);
 	if (zv->zv_queue == NULL)
@@ -1253,6 +1323,7 @@ zvol_alloc(dev_t dev, const char *name)
 	zv->zv_queue->queuedata = zv;
 	zv->zv_dev = dev;
 	zv->zv_open_count = 0;
+	zv->zv_name = kmem_alloc(MAXNAMELEN, KM_SLEEP);
 	strlcpy(zv->zv_name, name, MAXNAMELEN);
 
 	mutex_init(&zv->zv_znode.z_range_lock, NULL, MUTEX_DEFAULT, NULL);
@@ -1291,6 +1362,7 @@ zvol_free(zvol_state_t *zv)
 	blk_cleanup_queue(zv->zv_queue);
 	put_disk(zv->zv_disk);
 
+	kmem_free(zv->zv_name, MAXNAMELEN);
 	kmem_free(zv, sizeof (zvol_state_t));
 }
 
@@ -1310,7 +1382,7 @@ zvol_create_minor_impl(const char *name)
 	unsigned minor = 0;
 	int error = 0;
 
-	mutex_enter(&zvol_state_lock);
+	mutex_enter(&zvol_lock);
 
 	zv = zvol_find_by_name(name);
 	if (zv) {
@@ -1396,12 +1468,12 @@ out:
 
 	if (error == 0) {
 		zvol_insert(zv);
-		mutex_exit(&zvol_state_lock);
+		mutex_exit(&zvol_lock);
 		add_disk(zv->zv_disk);
-		mutex_enter(&zvol_state_lock);
+		mutex_enter(&zvol_lock);
 	}
 
-	mutex_exit(&zvol_state_lock);
+	mutex_exit(&zvol_lock);
 
 	return (SET_ERROR(error));
 }
@@ -1414,7 +1486,7 @@ zvol_rename_minor(zvol_state_t *zv, const char *newname)
 {
 	int readonly = get_disk_ro(zv->zv_disk);
 
-	ASSERT(MUTEX_HELD(&zvol_state_lock));
+	ASSERT(MUTEX_HELD(&zvol_lock));
 
 	strlcpy(zv->zv_name, newname, sizeof (zv->zv_name));
 
@@ -1550,16 +1622,16 @@ zvol_create_minors_impl(const char *name)
 static void
 zvol_remove_minors_impl(const char *name)
 {
-	zvol_state_t *zv, *zv_next;
+	zvol_state_t *zv, *zv_node_list;
 	int namelen = ((name) ? strlen(name) : 0);
 
 	if (zvol_inhibit_dev)
 		return;
 
-	mutex_enter(&zvol_state_lock);
+	mutex_enter(&zvol_lock);
 
-	for (zv = list_head(&zvol_state_list); zv != NULL; zv = zv_next) {
-		zv_next = list_next(&zvol_state_list, zv);
+	for (zv = list_head(&zvol_list); zv != NULL; zv = zv_node_list) {
+		zv_node_list = list_next(&zvol_list, zv);
 
 		if (name == NULL || strcmp(zv->zv_name, name) == 0 ||
 		    (strncmp(zv->zv_name, name, namelen) == 0 &&
@@ -1574,7 +1646,7 @@ zvol_remove_minors_impl(const char *name)
 		}
 	}
 
-	mutex_exit(&zvol_state_lock);
+	mutex_exit(&zvol_lock);
 }
 
 /*
@@ -1583,7 +1655,7 @@ zvol_remove_minors_impl(const char *name)
 static void
 zvol_rename_minors_impl(const char *oldname, const char *newname)
 {
-	zvol_state_t *zv, *zv_next;
+	zvol_state_t *zv, *zv_node_list;
 	int oldnamelen, newnamelen;
 	char *name;
 
@@ -1594,10 +1666,10 @@ zvol_rename_minors_impl(const char *oldname, const char *newname)
 	newnamelen = strlen(newname);
 	name = kmem_alloc(MAXNAMELEN, KM_SLEEP);
 
-	mutex_enter(&zvol_state_lock);
+	mutex_enter(&zvol_lock);
 
-	for (zv = list_head(&zvol_state_list); zv != NULL; zv = zv_next) {
-		zv_next = list_next(&zvol_state_list, zv);
+	for (zv = list_head(&zvol_list); zv != NULL; zv = zv_node_list) {
+		zv_node_list = list_next(&zvol_list, zv);
 
 		if (strcmp(zv->zv_name, oldname) == 0) {
 			zvol_rename_minor(zv, newname);
@@ -1611,7 +1683,7 @@ zvol_rename_minors_impl(const char *oldname, const char *newname)
 		}
 	}
 
-	mutex_exit(&zvol_state_lock);
+	mutex_exit(&zvol_lock);
 
 	kmem_free(name, MAXNAMELEN);
 }
@@ -1809,9 +1881,9 @@ zvol_init(void)
 {
 	int error;
 
-	list_create(&zvol_state_list, sizeof (zvol_state_t),
-	    offsetof(zvol_state_t, zv_next));
-	mutex_init(&zvol_state_lock, NULL, MUTEX_DEFAULT, NULL);
+	list_create(&zvol_list, sizeof (zvol_state_t),
+	    offsetof(zvol_state_t, zv_node_list));
+	mutex_init(&zvol_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	error = register_blkdev(zvol_major, ZVOL_DRIVER);
 	if (error) {
@@ -1825,8 +1897,8 @@ zvol_init(void)
 	return (0);
 
 out:
-	mutex_destroy(&zvol_state_lock);
-	list_destroy(&zvol_state_list);
+	mutex_destroy(&zvol_lock);
+	list_destroy(&zvol_list);
 
 	return (SET_ERROR(error));
 }
@@ -1839,8 +1911,8 @@ zvol_fini(void)
 	blk_unregister_region(MKDEV(zvol_major, 0), 1UL << MINORBITS);
 	unregister_blkdev(zvol_major, ZVOL_DRIVER);
 
-	list_destroy(&zvol_state_list);
-	mutex_destroy(&zvol_state_lock);
+	list_destroy(&zvol_list);
+	mutex_destroy(&zvol_lock);
 }
 
 module_param(zvol_inhibit_dev, uint, 0644);
