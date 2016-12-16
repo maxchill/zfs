@@ -728,23 +728,12 @@ zpl_ioctl_getflags(struct file *filp, void __user *arg)
 	return (error);
 }
 
-/*
- * fchange() is a helper macro to detect if we have been asked to change a
- * flag. This is ugly, but the requirement that we do this is a consequence of
- * how the Linux file attribute interface was designed. Another consequence is
- * that concurrent modification of files suffers from a TOCTOU race. Neither
- * are things we can fix without modifying the kernel-userland interface, which
- * is outside of our jurisdiction.
- */
-
-#define	fchange(f0, f1, b0, b1) ((((f0) & (b0)) == (b0)) != \
-	(((b1) & (f1)) == (f1)))
-
 static int
 zpl_ioctl_setflags(struct file *filp, void __user *arg)
 {
 	struct inode	*ip = file_inode(filp);
 	uint64_t	zfs_flags = ITOZ(ip)->z_pflags;
+	unsigned int	old_flags = 0;
 	unsigned int	ioctl_flags;
 	cred_t		*cr = CRED();
 	xvattr_t	xva;
@@ -761,10 +750,20 @@ zpl_ioctl_setflags(struct file *filp, void __user *arg)
 	if ((ioctl_flags & ~(FS_FL_USER_MODIFIABLE)))
 		return (-EACCES);
 
-	if ((fchange(ioctl_flags, zfs_flags, FS_IMMUTABLE_FL, ZFS_IMMUTABLE) ||
-	    fchange(ioctl_flags, zfs_flags, FS_APPEND_FL, ZFS_APPENDONLY)) &&
-	    !capable(CAP_LINUX_IMMUTABLE))
-		return (-EACCES);
+	/*
+	 * Changing FS_IMMUTABLE_FL or FS_APPEND_FL requires the capability
+	 * CAP_LINUX_IMMUTABLE.  Map ZFS_* pflags to FS_* flags for comparison.
+	 */
+	if (zfs_flags & ZFS_IMMUTABLE)
+		old_flags |= FS_IMMUTABLE_FL;
+
+	if (zfs_flags & ZFS_APPENDONLY)
+		old_flags |= FS_APPEND_FL;
+
+	if ((ioctl_flags ^ old_flags) & (FS_IMMUTABLE_FL | FS_APPEND_FL)) {
+		if (!capable(CAP_LINUX_IMMUTABLE))
+			return (-EACCES);
+	}
 
 	if (!zpl_inode_owner_or_capable(ip))
 		return (-EACCES);
