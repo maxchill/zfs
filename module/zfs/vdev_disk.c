@@ -35,6 +35,8 @@
 #include <sys/zio.h>
 #include <sys/sunldi.h>
 
+unsigned long zfs_vdev_open_retry = 50;
+unsigned long zfs_vdev_open_delay = 100;
 char *zfs_vdev_scheduler = VDEV_SCHEDULER;
 static void *zfs_vdev_holder = VDEV_HOLDER;
 
@@ -291,11 +293,11 @@ vdev_disk_open(vdev_t *v, uint64_t *psize, uint64_t *max_psize,
 	if (v->vdev_wholedisk && v->vdev_expanding)
 		bdev = vdev_disk_rrpart(v->vdev_path, mode, vd);
 
-	while (IS_ERR(bdev) && count < 50) {
+	while (IS_ERR(bdev) && count < zfs_vdev_open_retry) {
 		bdev = vdev_bdev_open(v->vdev_path,
 		    vdev_bdev_mode(mode), zfs_vdev_holder);
 		if (unlikely(PTR_ERR(bdev) == -ENOENT)) {
-			msleep(10);
+			msleep(zfs_vdev_open_delay);
 			count++;
 		} else if (IS_ERR(bdev)) {
 			break;
@@ -801,6 +803,12 @@ vdev_ops_t vdev_disk_ops = {
 	VDEV_TYPE_DISK,		/* name of this vdev type */
 	B_TRUE			/* leaf vdev */
 };
+
+module_param(zfs_vdev_open_retry, ulong, 0644);
+MODULE_PARM_DESC(zfs_vdev_open_retry, "Retry attempts when opening vdev");
+
+module_param(zfs_vdev_open_delay, ulong, 0644);
+MODULE_PARM_DESC(zfs_vdev_open_delay, "Delay in ms between retry open attempts");
 
 module_param(zfs_vdev_scheduler, charp, 0644);
 MODULE_PARM_DESC(zfs_vdev_scheduler, "I/O scheduler");
