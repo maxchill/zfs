@@ -34,7 +34,8 @@
 #define	ZFS_PROBE2(a, c, e)		((void) 0)
 #define	ZFS_PROBE3(a, c, e, g)		((void) 0)
 #define	ZFS_PROBE4(a, c, e, g, i)	((void) 0)
-#define	ZFS_SET_ERROR(err)		((void) 0)
+#define	ZFS_SET_ERROR(err)		\
+    (err ? (dprintf("rc=%d\n", err), err) : (err))
 
 #else
 
