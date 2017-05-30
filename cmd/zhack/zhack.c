@@ -117,6 +117,18 @@ space_delta_cb(dmu_object_type_t bonustype, void *data,
 	/* NOTREACHED */
 }
 
+static nvlist_t *
+pre_import_callback(nvlist_t *config)
+{
+	if (zfs_force_import_required(config)) {
+		printf("Pool %s may be in use, checking for activity...\n",
+		    fnvlist_lookup_string(config, ZPOOL_CONFIG_POOL_NAME));
+		(void) fflush(stdout);
+	}
+
+	return (config);
+}
+
 /*
  * Target is the dataset whose pool we want to open.
  */
@@ -127,7 +139,7 @@ import_pool(const char *target, boolean_t readonly)
 	nvlist_t *pools;
 	int error;
 	char *sepp;
-	spa_t *spa;
+	spa_t *spa = NULL;
 	nvpair_t *elem;
 	nvlist_t *props;
 	char *name;
@@ -137,6 +149,7 @@ import_pool(const char *target, boolean_t readonly)
 	ASSERT(g_zfs != NULL);
 
 	dmu_objset_register_type(DMU_OST_ZFS, space_delta_cb);
+	libzfs_set_import_cb(g_zfs, pre_import_callback);
 
 	g_readonly = readonly;
 

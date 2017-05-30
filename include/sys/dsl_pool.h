@@ -38,6 +38,7 @@
 #include <sys/bpobj.h>
 #include <sys/bptree.h>
 #include <sys/rrwlock.h>
+#include <sys/mmp.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -125,6 +126,7 @@ typedef struct dsl_pool {
 	txg_list_t dp_dirty_dirs;
 	txg_list_t dp_sync_tasks;
 	taskq_t *dp_sync_taskq;
+	mmp_thread_state_t dp_mmp;
 
 	/*
 	 * Protects administrative changes (properties, namespace)

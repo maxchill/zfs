@@ -820,12 +820,37 @@ pool_active(libzfs_handle_t *hdl, const char *name, uint64_t guid,
 	return (0);
 }
 
+boolean_t
+zfs_force_import_required(nvlist_t *config)
+{
+	uint64_t state;
+	uint64_t hostid = 0, orig_txg = 0;
+	unsigned long system_hostid = get_system_hostid();
+
+	state = fnvlist_lookup_uint64(config, ZPOOL_CONFIG_POOL_STATE);
+	(void) nvlist_lookup_uint64(config, ZPOOL_CONFIG_HOSTID,
+	    &hostid);
+	(void) nvlist_lookup_uint64(config, ZPOOL_CONFIG_IMPORT_TXG,
+	    &orig_txg);
+
+	if (state == POOL_STATE_ACTIVE &&
+	    (unsigned long)hostid != system_hostid)
+		return (B_TRUE);
+
+	return (B_FALSE);
+}
+
 static nvlist_t *
 refresh_config(libzfs_handle_t *hdl, nvlist_t *config)
 {
 	nvlist_t *nvl;
 	zfs_cmd_t zc = {"\0"};
 	int err, dstbuf_size;
+
+	if (hdl->libzfs_pre_import_cb)
+		config = hdl->libzfs_pre_import_cb(config);
+		if (config == NULL)
+			return (NULL);
 
 	if (zcmd_write_conf_nvlist(hdl, &zc, config) != 0)
 		return (NULL);

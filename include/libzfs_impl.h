@@ -78,6 +78,9 @@ struct libzfs_handle {
 	libzfs_fru_t *libzfs_fru_list;
 #endif /* HAVE_LIBTOPO */
 	char libzfs_chassis_id[256];
+
+	/* called prior to (try)import ioctl with pool config */
+	libzfs_import_cb_t libzfs_pre_import_cb;
 };
 
 #define	ZFSSHARE_MISS	0x01	/* Didn't find entry in cache */
@@ -131,7 +134,7 @@ typedef enum {
 	SHARED_SMB = 0x4
 } zfs_share_type_t;
 
-#define	CONFIG_BUF_MINSIZE	65536
+#define	CONFIG_BUF_MINSIZE	131072
 
 int zfs_error(libzfs_handle_t *, int, const char *);
 int zfs_error_fmt(libzfs_handle_t *, int, const char *, ...);

@@ -1713,6 +1713,9 @@ zpool_import_props(libzfs_handle_t *hdl, nvlist_t *config, const char *newname,
 	int error = 0;
 	char errbuf[1024];
 
+	if (hdl->libzfs_pre_import_cb)
+		hdl->libzfs_pre_import_cb(config);
+
 	verify(nvlist_lookup_string(config, ZPOOL_CONFIG_POOL_NAME,
 	    &origname) == 0);
 
@@ -1822,6 +1825,32 @@ zpool_import_props(libzfs_handle_t *hdl, nvlist_t *config, const char *newname,
 			 * Unsupported version.
 			 */
 			(void) zfs_error(hdl, EZFS_BADVERSION, desc);
+			break;
+
+		case EREMOTEIO:
+			if (nv != NULL && nvlist_lookup_nvlist(nv,
+			    ZPOOL_CONFIG_LOAD_INFO, &nvinfo) == 0) {
+				char *hostname = "unknown";
+				uint64_t hostid = 0;
+
+				if (nvlist_exists(nvinfo,
+				    ZPOOL_CONFIG_IMPORT_HOSTNAME))
+					hostname = fnvlist_lookup_string(nvinfo,
+					    ZPOOL_CONFIG_IMPORT_HOSTNAME);
+
+				if (nvlist_exists(nvinfo,
+				    ZPOOL_CONFIG_IMPORT_HOSTID))
+					hostid = fnvlist_lookup_uint64(nvinfo,
+					    ZPOOL_CONFIG_IMPORT_HOSTID);
+
+				(void) snprintf(desc, sizeof (desc),
+				    dgettext(TEXT_DOMAIN, "The pool is "
+				    "imported on host '%s' (hostid=%lx).\n"
+				    "Export the pool from the remote "
+				    "system then it may be imported.\n"),
+				    hostname, hostid);
+			}
+			(void) zfs_error(hdl, EZFS_ACTIVE_POOL, desc);
 			break;
 
 		case EINVAL:
@@ -2185,7 +2214,7 @@ zpool_find_vdev(zpool_handle_t *zhp, const char *path, boolean_t *avail_spare,
 }
 
 static int
-vdev_online(nvlist_t *nv)
+vdev_is_online(nvlist_t *nv)
 {
 	uint64_t ival;
 
@@ -2253,7 +2282,7 @@ vdev_get_physpaths(nvlist_t *nv, char *physpath, size_t phypath_size,
 				return (EZFS_INVALCONFIG);
 		}
 
-		if (vdev_online(nv)) {
+		if (vdev_is_online(nv)) {
 			if ((ret = vdev_get_one_physpath(nv, physpath,
 			    phypath_size, rsz)) != 0)
 				return (ret);

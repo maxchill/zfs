@@ -147,6 +147,7 @@ typedef enum zfs_error {
 	EZFS_DIFF,		/* general failure of zfs diff */
 	EZFS_DIFFDATA,		/* bad zfs diff data */
 	EZFS_POOLREADONLY,	/* pool is in read-only mode */
+	EZFS_ACTIVE_POOL,	/* pool is imported on a different system */
 	EZFS_UNKNOWN
 } zfs_error_t;
 
@@ -194,6 +195,11 @@ typedef struct zpool_handle zpool_handle_t;
 typedef struct libzfs_handle libzfs_handle_t;
 
 /*
+ * Pre-import callback
+ */
+typedef nvlist_t *(*libzfs_import_cb_t)(nvlist_t *pool_config);
+
+/*
  * Library initialization
  */
 extern libzfs_handle_t *libzfs_init(void);
@@ -220,6 +226,7 @@ extern int libzfs_mnttab_find(libzfs_handle_t *, const char *,
 extern void libzfs_mnttab_add(libzfs_handle_t *, const char *,
     const char *, const char *);
 extern void libzfs_mnttab_remove(libzfs_handle_t *, const char *);
+extern void libzfs_set_import_cb(libzfs_handle_t *, libzfs_import_cb_t cb);
 
 /*
  * Basic handle functions
@@ -325,6 +332,7 @@ typedef enum {
 	ZPOOL_STATUS_FAILING_DEV,	/* device experiencing errors */
 	ZPOOL_STATUS_VERSION_NEWER,	/* newer on-disk version */
 	ZPOOL_STATUS_HOSTID_MISMATCH,	/* last accessed by another system */
+	ZPOOL_STATUS_HOSTID_ACTIVE,	/* currently active on another system */
 	ZPOOL_STATUS_IO_FAILURE_WAIT,	/* failed I/O, failmode 'wait' */
 	ZPOOL_STATUS_IO_FAILURE_CONTINUE, /* failed I/O, failmode 'continue' */
 	ZPOOL_STATUS_BAD_LOG,		/* cannot read log chain(s) */
@@ -740,6 +748,7 @@ extern int zfs_append_partition(char *path, size_t max_len);
 extern int zfs_resolve_shortname(const char *name, char *path, size_t pathlen);
 extern int zfs_strcmp_pathname(char *name, char *cmp_name, int wholedisk);
 extern int zfs_path_order(char *path, int *order);
+extern boolean_t zfs_force_import_required(nvlist_t *config);
 
 /*
  * Mount support functions.
