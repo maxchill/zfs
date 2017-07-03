@@ -73,6 +73,7 @@
 .Cm export
 .Op Fl a
 .Op Fl f
+.Op Fl F
 .Ar pool Ns ...
 .Nm
 .Cm get
@@ -1033,6 +1034,7 @@ Print the entire payload for each event.
 .Cm export
 .Op Fl a
 .Op Fl f
+.Op Fl F
 .Ar pool Ns ...
 .Xc
 Exports the given pools from the system.
@@ -1062,6 +1064,16 @@ command.
 .Pp
 This command will forcefully export the pool even if it has a shared spare that
 is currently being used.
+This may lead to potential data corruption.
+.It Fl F
+Forcefully export the pool without updating the on-disk labels. Pools exportedi
+with this option will need to be force imported if they are moved to a
+different system.
+.Pp
+This option can be used to export a suspended pool which cannot be safely
+resumed with
+.Nm zpool Cm clear .
+When exporting a suspended pool all dirty in-core data will be discarded.
 This may lead to potential data corruption.
 .El
 .It Xo
