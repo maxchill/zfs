@@ -43,6 +43,7 @@ function cleanup
 {
 	mmp_pool_destroy $MMP_DIR $MMP_POOL
 	log_must set_tunable64 zfs_multihost_interval $MMP_INTERVAL_DEFAULT
+	log_must mmp_clear_hostid
 }
 
 log_assert "multihost=on|off active pool activity checks"
@@ -53,7 +54,7 @@ mmp_pool_destroy $MMP_POOL $MMP_DIR
 mmp_pool_create $MMP_POOL $MMP_DIR
 
 # 2. Verify 'zpool import' reports an active pool.
-log_must set_spl_tunable spl_hostid $SPL_HOSTID2
+log_must mmp_set_hostid $HOSTID2
 log_must set_tunable64 zfs_multihost_interval $MMP_INTERVAL_MIN
 log_must is_pool_imported $MMP_POOL "-d $MMP_DIR"
 
@@ -77,15 +78,15 @@ log_must wait_pool_imported $MMP_POOL "-d $MMP_DIR"
 #    - hostid=matches   - safe to import the pool
 #    - hostid=different - previously imported on a different system
 #
-log_must set_spl_tunable spl_hostid $SPL_HOSTID_DEFAULT
+log_must mmp_clear_hostid
 MMP_IMPORTED_MSG="Set the system hostid"
 log_must check_pool_import $MMP_POOL "-d $MMP_DIR" "action" $MMP_IMPORTED_MSG
 
-log_must set_spl_tunable spl_hostid $SPL_HOSTID1
+log_must mmp_set_hostid $HOSTID1
 MMP_IMPORTED_MSG="The pool can be imported"
 log_must check_pool_import $MMP_POOL "-d $MMP_DIR" "action" $MMP_IMPORTED_MSG
 
-log_must set_spl_tunable spl_hostid $SPL_HOSTID2
+log_must mmp_set_hostid $HOSTID2
 MMP_IMPORTED_MSG="The pool was last accessed by another system."
 log_must check_pool_import $MMP_POOL "-d $MMP_DIR" "status" $MMP_IMPORTED_MSG
 

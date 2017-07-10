@@ -28,6 +28,7 @@
 
 . $STF_SUITE/include/libtest.shlib
 . $STF_SUITE/tests/functional/mmp/mmp.cfg
+. $STF_SUITE/tests/functional/mmp/mmp.kshlib
 
 verify_runnable "both"
 

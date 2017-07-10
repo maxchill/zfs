@@ -40,14 +40,14 @@ verify_runnable "both"
 function cleanup
 {
 	default_cleanup_noexit
-	log_must set_spl_tunable spl_hostid $SPL_HOSTID_DEFAULT
+	log_must mmp_clear_hostid
 }
 
 log_assert "multihost=on|off inactive pool activity checks"
 log_onexit cleanup
 
 # 1. Create a zpool
-log_must set_spl_tunable spl_hostid $SPL_HOSTID1
+log_must mmp_set_hostid $HOSTID1
 default_setup_noexit $DISK
 
 # 2. Verify multihost=off and hostids match (no activity check)
@@ -60,18 +60,18 @@ done
 
 # 3. Verify multihost=off and hostids differ (no activity check)
 log_must zpool export -F $TESTPOOL
-log_must set_spl_tunable spl_hostid $SPL_HOSTID2
+log_must mmp_set_hostid $HOSTID2
 log_mustnot import_no_activity_check $TESTPOOL ""
 log_must import_no_activity_check $TESTPOOL "-f"
 
 # 4. Verify multihost=off and hostid zero allowed (no activity check)
 log_must zpool export -F $TESTPOOL
-log_must set_spl_tunable spl_hostid $SPL_HOSTID_DEFAULT
+log_must mmp_clear_hostid
 log_mustnot import_no_activity_check $TESTPOOL ""
 log_must import_no_activity_check $TESTPOOL "-f"
 
 # 5. Verify multihost=on and hostids match (no activity check)
-log_must mmp_pool_set_hostid $TESTPOOL $SPL_HOSTID1
+log_must mmp_pool_set_hostid $TESTPOOL $HOSTID1
 log_must zpool set multihost=on $TESTPOOL
 
 for opt in "" "-f"; do
@@ -81,13 +81,13 @@ done
 
 # 6. Verify multihost=on and hostids differ (activity check)
 log_must zpool export -F $TESTPOOL
-log_must set_spl_tunable spl_hostid $SPL_HOSTID2
+log_must mmp_set_hostid $HOSTID2
 log_mustnot import_activity_check $TESTPOOL ""
 log_must import_activity_check $TESTPOOL "-f"
 
 # 7. Verify multihost=on and hostid zero fails (activity check)
 log_must zpool export -F $TESTPOOL
-log_must set_spl_tunable spl_hostid $SPL_HOSTID_DEFAULT
+log_must mmp_clear_hostid
 MMP_IMPORTED_MSG="Set the system hostid"
 log_must check_pool_import $TESTPOOL "-f" "action" $MMP_IMPORTED_MSG
 log_mustnot import_activity_check $TESTPOOL "-f"

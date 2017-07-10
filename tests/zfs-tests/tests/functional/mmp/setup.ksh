@@ -23,6 +23,10 @@
 
 verify_runnable "global"
 
+if [ -e $HOSTID_FILE ]; then
+	log_unsupported "System has existing $HOSTID_FILE file"
+fi
+
 log_must set_tunable64 zfs_multihost_history $MMP_HISTORY
 
 log_pass "mmp setup pass"

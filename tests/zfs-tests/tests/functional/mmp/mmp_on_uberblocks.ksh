@@ -32,6 +32,7 @@
 
 . $STF_SUITE/include/libtest.shlib
 . $STF_SUITE/tests/functional/mmp/mmp.cfg
+. $STF_SUITE/tests/functional/mmp/mmp.kshlib
 
 verify_runnable "both"
 
@@ -41,15 +42,15 @@ function cleanup
 {
 	default_cleanup_noexit
 	set_tunable64 zfs_txg_timeout $TXG_TIMEOUT_DEFAULT
-	log_must set_spl_tunable spl_hostid $SPL_HOSTID_DEFAULT
 	log_must rm -f $PREV_UBER $CURR_UBER
+	log_must mmp_clear_hostid
 }
 
 log_assert "Ensure MMP uberblocks update at the correct interval"
 log_onexit cleanup
 
 log_must set_tunable64 zfs_txg_timeout $TXG_TIMEOUT_LONG
-log_must set_spl_tunable spl_hostid $SPL_HOSTID1
+log_must mmp_set_hostid $HOSTID1
 
 default_setup_noexit $DISK
 log_must zpool set multihost=on $TESTPOOL

@@ -75,6 +75,29 @@ function try_pool_import # pool opts message
 	return $?
 }
 
+function mmp_set_hostid
+{
+	typeset hostid=$1
+
+	a=${hostid:6:2}
+	b=${hostid:4:2}
+	c=${hostid:2:2}
+	d=${hostid:0:2}
+
+	printf "\\x$a\\x$b\\x$c\\x$d" >$HOSTID_FILE
+
+	if [ $(hostid) != "$hostid" ]; then
+		return 1
+	fi
+
+	return 0
+}
+
+function mmp_clear_hostid
+{
+	rm -f $HOSTID_FILE
+}
+
 function mmp_pool_create # pool dir
 {
 	typeset pool=${1:-$MMP_POOL}
@@ -84,14 +107,14 @@ function mmp_pool_create # pool dir
 	log_must mkdir -p $dir
 	log_must truncate -s $MINVDEVSIZE $dir/vdev1 $dir/vdev2
 
-	log_must set_spl_tunable spl_hostid $SPL_HOSTID1
+	log_must mmp_set_hostid $HOSTID1
 	log_must zpool create -f $pool mirror $dir/vdev1 $dir/vdev2
 	log_must zpool set multihost=on $pool
 	log_must zpool export $pool
-	log_must set_spl_tunable spl_hostid $SPL_HOSTID2
+	log_must mmp_set_hostid $HOSTID2
 
-	log_note "Starting ztest in the background as hostid $SPL_HOSTID1"
-	log_must eval "ZFS_HOSTID=$SPL_HOSTID1 ztest $opts >/dev/null 2>&1 &"
+	log_note "Starting ztest in the background as hostid $HOSTID1"
+	log_must eval "ZFS_HOSTID=$HOSTID1 ztest $opts >/dev/null 2>&1 &"
 
 	while ! is_pool_imported "$pool" "-d $dir"; do
 		log_must pgrep ztest
@@ -115,7 +138,7 @@ function mmp_pool_destroy # pool dir
         fi
 
 	rm -Rf $dir
-	set_spl_tunable spl_hostid $SPL_HOSTID_DEFAULT
+	mmp_clear_hostid
 }
 
 function mmp_pool_set_hostid # pool hostid
@@ -123,7 +146,7 @@ function mmp_pool_set_hostid # pool hostid
 	typeset pool=$1
 	typeset hostid=$2
 
-	log_must set_spl_tunable spl_hostid $hostid
+	log_must mmp_set_hostid $hostid
 	log_must zpool export $pool
 	log_must zpool import $pool
 

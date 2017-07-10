@@ -3441,17 +3441,6 @@ function set_tunable32
 	set_tunable_impl "$1" "$2" W
 }
 
-#
-# Set a spl global system tunable
-#
-# $1 tunable name
-# $2 tunable values
-#
-function set_spl_tunable
-{
-	set_tunable_impl "$1" "$2" W "spl"
-}
-
 function set_tunable_impl
 {
 	typeset tunable="$1"
@@ -3486,16 +3475,6 @@ function set_tunable_impl
 function get_tunable
 {
 	get_tunable_impl "$1"
-}
-
-#
-# Get a spl global system tunable
-#
-# $1 tunable name
-#
-function get_spl_tunable
-{
-	get_tunable_impl "$1" "spl"
 }
 
 function get_tunable_impl
