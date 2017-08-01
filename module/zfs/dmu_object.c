@@ -184,14 +184,16 @@ dmu_object_alloc_dnsize(objset_t *os, dmu_object_type_t ot, int blocksize,
 			}
 			rw_exit(&dn->dn_struct_rwlock);
 			dnode_rele(dn, FTAG);
+			DNODE_STAT_BUMP(dnode_alloc_race);
 		}
 
+		/*
+		 * Skip to next known valid starting point on error.  This
+		 * is the start of the next block of dnodes.
+		 */
 		if (dmu_object_next(os, &object, B_TRUE, 0) != 0) {
-			/*
-			 * Skip to next known valid starting point for a
-			 * dnode.
-			 */
 			object = P2ROUNDUP(object + 1, DNODES_PER_BLOCK);
+			DNODE_STAT_BUMP(dnode_alloc_next_block);
 		}
 		(void) atomic_swap_64(cpuobj, object);
 	}
@@ -304,24 +306,37 @@ dmu_object_next(objset_t *os, uint64_t *objectp, boolean_t hole, uint64_t txg)
 	if (*objectp == 0) {
 		start_obj = 1;
 	} else if (ds && ds->ds_feature_inuse[SPA_FEATURE_LARGE_DNODE]) {
+		uint64_t i = *objectp + 1;
+		uint64_t last_obj = P2ROUNDUP(*objectp, DNODES_PER_BLOCK);
+		dmu_object_info_t doi;
+
 		/*
-		 * For large_dnode datasets, scan from the beginning of the
-		 * dnode block to find the starting offset. This is needed
-		 * because objectp could be part of a large dnode so we can't
-		 * assume it's a hole even if dmu_object_info() returns ENOENT.
+		 * Scan through the remaining meta dnode block.  The contents
+		 * of each slot in the block are known so it can be quickly
+		 * checked.  If the block is exhausted without a match then
+		 * hand off to dnode_next_offset() for further scanning.
 		 */
-		int epb = DNODE_BLOCK_SIZE >> DNODE_SHIFT;
-		int skip;
-		uint64_t i;
-
-		for (i = *objectp & ~(epb - 1); i <= *objectp; i += skip) {
-			dmu_object_info_t doi;
-
+		while (i < last_obj) {
 			error = dmu_object_info(os, i, &doi);
-			if (error)
-				skip = 1;
-			else
-				skip = doi.doi_dnodesize >> DNODE_SHIFT;
+			if (error == ENOENT) {
+				if (hole) {
+					*objectp = i;
+					return (0);
+				} else {
+					i++;
+				}
+			} else if (error == EEXIST) {
+				i++;
+			} else if (error == 0) {
+				if (hole) {
+					i += doi.doi_dnodesize >> DNODE_SHIFT;
+				} else {
+					*objectp = i;
+					return (0);
+				}
+			} else {
+				return (error);
+			}
 		}
 
 		start_obj = i;
