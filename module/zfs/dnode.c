@@ -1059,108 +1059,12 @@ dnode_buf_evict_async(void *dbu)
 	    children_dnodes->dnc_count * sizeof (dnode_handle_t));
 }
 
-/*
- * Return true if the given index is interior to a dnode already
- * allocated in the block. That is, the index is neither free nor
- * allocated, but is consumed by a large dnode.
- *
- * The dnode_phys_t buffer may not be in sync with the in-core dnode
- * structure, so we try to check the dnode structure first and fall back
- * to the dnode_phys_t buffer it doesn't exist.  When an in-code dnode
- * exists we can always trust dn->dn_num_slots to be accurate, even for
- * a held dnode which has not yet been fully allocated.
- */
-static boolean_t
-dnode_is_consumed(dnode_children_t *children, dnode_phys_t *dn_block, int idx)
-{
-	int skip, i;
-
-	for (i = 0; i < idx; i += skip) {
-		dnode_handle_t *dnh = &children->dnc_children[i];
-
-		if (dnh->dnh_dnode != NULL) {
-			skip = dnh->dnh_dnode->dn_num_slots;
-		} else {
-			if (dn_block[i].dn_type != DMU_OT_NONE)
-				skip = dn_block[i].dn_extra_slots + 1;
-			else
-				skip = 1;
-		}
-	}
-
-	return (i > idx);
-}
-
-/*
- * Return true if the given index in the dnode block is a valid
- * allocated dnode. That is, the index is not consumed by a large
- * dnode and is not free.
- *
- * The dnode_phys_t buffer may not be in sync with the in-core dnode
- * structure, so we try to check the dnode structure first and fall back
- * to the dnode_phys_t buffer it doesn't exist.
- */
-static boolean_t
-dnode_is_allocated(dnode_children_t *children, dnode_phys_t *dn_block, int idx)
-{
-	dnode_handle_t *dnh;
-	dmu_object_type_t ot;
-
-	if (dnode_is_consumed(children, dn_block, idx))
-		return (B_FALSE);
-
-	dnh = &children->dnc_children[idx];
-	if (dnh->dnh_dnode != NULL)
-		ot = dnh->dnh_dnode->dn_type;
-	else
-		ot = dn_block[idx].dn_type;
-
-	return (ot != DMU_OT_NONE);
-}
-
-/*
- * Return true if the given range of indices in the dnode block are
- * free. That is, the starting index is not consumed by a large dnode
- * and none of the indices are allocated.
- *
- * The dnode_phys_t buffer may not be in sync with the in-core dnode
- * structure, so we try to check the dnode structure first and fall back
- * to the dnode_phys_t buffer it doesn't exist.
- */
-static boolean_t
-dnode_is_free(dnode_children_t *children, dnode_phys_t *dn_block, int idx,
-    int slots)
-{
-	if (idx + slots > DNODES_PER_BLOCK)
-		return (B_FALSE);
-
-	if (dnode_is_consumed(children, dn_block, idx))
-		return (B_FALSE);
-
-	for (int i = idx; i < idx + slots; i++) {
-		dnode_handle_t *dnh = &children->dnc_children[i];
-		dmu_object_type_t ot;
-
-		if (dnh->dnh_dnode != NULL) {
-			if (dnh->dnh_dnode->dn_num_slots > 1)
-				return (B_FALSE);
-
-			ot = dnh->dnh_dnode->dn_type;
-		} else {
-			ot = dn_block[i].dn_type;
-		}
-
-		if (ot != DMU_OT_NONE)
-			return (B_FALSE);
-	}
-
-	return (B_TRUE);
-}
-
 static void
 dnode_hold_slots(dnode_children_t *children, int idx, int slots)
 {
-	for (int i = idx; i < MIN(idx + slots, DNODES_PER_BLOCK); i++) {
+	ASSERT3S(idx + slots, <=, DNODES_PER_BLOCK);
+
+	for (int i = idx; i < idx + slots; i++) {
 		dnode_handle_t *dnh = &children->dnc_children[i];
 		zrl_add(&dnh->dnh_zrlock);
 	}
@@ -1194,7 +1098,7 @@ dnode_hold_impl(objset_t *os, uint64_t object, int flag, int slots,
 	dnode_t *mdn, *dn;
 	dmu_buf_impl_t *db;
 	dnode_children_t *children_dnodes;
-	dnode_phys_t *dn_block_begin;
+	dnode_phys_t *dn_block;
 	dnode_handle_t *dnh;
 
 	ASSERT(!(flag & DNODE_MUST_BE_ALLOCATED) || (slots == 0));
@@ -1255,6 +1159,9 @@ dnode_hold_impl(objset_t *os, uint64_t object, int flag, int slots,
 	ASSERT3U(db->db.db_size, >=, 1<<DNODE_SHIFT);
 	epb = db->db.db_size >> DNODE_SHIFT;
 
+	idx = object & (epb - 1);
+	dn_block = (dnode_phys_t *)db->db.db_data;
+
 	ASSERT(DB_DNODE(db)->dn_type == DMU_OT_DNODE);
 	children_dnodes = dmu_buf_get_user(&db->db);
 	if (children_dnodes == NULL) {
@@ -1263,8 +1170,23 @@ dnode_hold_impl(objset_t *os, uint64_t object, int flag, int slots,
 		    epb * sizeof (dnode_handle_t), KM_SLEEP);
 		children_dnodes->dnc_count = epb;
 		dnh = &children_dnodes->dnc_children[0];
-		for (i = 0; i < epb; i++) {
+
+		for (i = 0; i < epb; i++)
 			zrl_init(&dnh[i].dnh_zrlock);
+
+		while (i < epb) {
+			if (dn_block[i].dn_type != DMU_OT_NONE) {
+				int extra = dn_block[i].dn_extra_slots;
+
+				dnh[i].dnh_dnode = DN_SLOT_ALLOC
+				for (int j = i + 1; j < i + 1 + extra; j++)
+					dnh[j].dnh_dnode = DN_SLOT_INTERIOR;
+
+				i += 1 + extra;
+			} else {
+				dnh[i].dnh_dnode = DN_SLOT_EMPTY;
+				i++;
+			}
 		}
 		dmu_buf_init_user(&children_dnodes->dnc_dbu, NULL,
 		    dnode_buf_evict_async, NULL);
@@ -1282,31 +1204,46 @@ dnode_hold_impl(objset_t *os, uint64_t object, int flag, int slots,
 	}
 	ASSERT(children_dnodes->dnc_count == epb);
 
-	idx = object & (epb - 1);
-	dn_block_begin = (dnode_phys_t *)db->db.db_data;
+	if (flags & DNODE_MUST_BE_ALLOCATED) {
+		slots = 1;
+		dnode_hold_slots(children_dnodes, idx, slots);
+		dnh = &children_dnodes->dnc_children[idx];
+		dn = dnh->dnh_dnode;
 
-	dnode_hold_slots(children_dnodes, idx, slots);
+		if (dn == DN_SLOT_ALLOC) {
+			dn = dnode_create(os, dn_block + idx, db, object, dnh);
+		} else if (dn == DN_SLOT_EMPTY || dn == DN_SLOT_INTERIOR) {
+			dnode_rele_slots(children_dnodes, idx, slots);
+			dbuf_rele(db, FTAG);
+			return (SET_ERROR(ENOENT));
+		}
+	} else if (flag & DNODE_MUST_BE_FREE) {
 
-	if ((flag & DNODE_MUST_BE_FREE) &&
-	    !dnode_is_free(children_dnodes, dn_block_begin, idx, slots)) {
-		dnode_rele_slots(children_dnodes, idx, slots);
-		dbuf_rele(db, FTAG);
-		return (SET_ERROR(ENOSPC));
-	} else if ((flag & DNODE_MUST_BE_ALLOCATED) &&
-	    !dnode_is_allocated(children_dnodes, dn_block_begin, idx)) {
-		dnode_rele_slots(children_dnodes, idx, slots);
-		dbuf_rele(db, FTAG);
-		return (SET_ERROR(ENOENT));
+		if (idx + slots >= DNODES_PER_BLOCK) {
+			dbuf_rele(db, FTAG);
+			return (SET_ERROR(ENOSPC));
+		}
+
+		dnode_hold_slots(children_dnodes, idx, slots);
+
+		for (i = idx; i < idx + slots; i++) {
+			dnode_handle_t *dnh = &children->dnc_children[i];
+			if (dnh->dnh_dnode != (void *)(ENOENT)) {
+				dnode_rele_slots(children_dnodes, idx, slots);
+				dbuf_rele(db, FTAG);
+				return (SET_ERROR(ENOSPC));
+			}
+		}
+
+		dn = dnode_create(os, dn_block + idx, slots, db, object, dnh);
+
+		for (i = idx; i < idx + slots; i++)
+			children->dnc_children[i].dnh_dnode = DN_SLOT_ALLOC;
 	}
-
-	dnh = &children_dnodes->dnc_children[idx];
-	dn = dnh->dnh_dnode;
-	if (dn == NULL)
-		dn = dnode_create(os, dn_block_begin + idx, slots, db,
-		    object, dnh);
 
 	mutex_enter(&dn->dn_mtx);
 	type = dn->dn_type;
+
 	if (dn->dn_free_txg ||
 	    ((flag & DNODE_MUST_BE_FREE) && !refcount_is_zero(&dn->dn_holds))) {
 		mutex_exit(&dn->dn_mtx);
@@ -1314,6 +1251,7 @@ dnode_hold_impl(objset_t *os, uint64_t object, int flag, int slots,
 		dbuf_rele(db, FTAG);
 		return (SET_ERROR(type == DMU_OT_NONE ? ENOENT : EEXIST));
 	}
+
 	if (refcount_add(&dn->dn_holds, tag) == 1)
 		dbuf_add_ref(db, dnh);
 
