@@ -6612,7 +6612,7 @@ zpool_do_status(int argc, char **argv)
 	char *cmd = NULL;
 
 	/* check options */
-	while ((c = getopt(argc, argv, "c:gLPvxDT:b")) != -1) {
+	while ((c = getopt(argc, argv, "c:gLPvxDT:")) != -1) {
 		switch (c) {
 		case 'c':
 			if (cmd != NULL) {

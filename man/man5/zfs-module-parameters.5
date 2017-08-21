@@ -623,6 +623,18 @@ Default value: \fB0\fR.
 .sp
 .ne 2
 .na
+\fBzfs_arc_min_long_lifespan\fR (int)
+.ad
+.RS 12n
+Minimum time "long-lived" blocks are locked in the ARC, specified in jiffies.
+A value of 0 will default to 6 seconds.
+.sp
+Default value: \fB0\fR.
+.RE
+
+.sp
+.ne 2
+.na
 \fBzfs_multilist_num_sublists\fR (int)
 .ad
 .RS 12n
@@ -1653,7 +1665,7 @@ Default value: \fB3,000\fR.
 .sp
 .ne 2
 .na
-\fBzfs_scan_min_time_ms\fR (int)
+\fBzfs_scrub_min_time_ms\fR (int)
 .ad
 .RS 12n
 Scrubs are processed by the sync thread. While scrubbing it will spend
@@ -1823,7 +1835,7 @@ Indicates the largest gap in bytes between scrub / resilver I/Os that will still
 be considered sequential for sorting purposes. Changing this value will not
 affect scrubs or resilvers that are already in progress.
 .sp
-Default value: \fB1048576 (1 MB)\fR.
+Default value: \fB2097152 (2 MB)\fR.
 .RE
 
 .sp
@@ -1836,8 +1848,8 @@ This tunable affects how scrub and resilver I/O segments are ordered. A higher
 number indicates that we care more about how filled in a segment is, while a
 lower number indicates we care more about the size of the extent without
 considering the gaps within a segment. This value is only tunable upon module
-insertion. Changing the value afterwards will have no affect on scrub
-performance.
+insertion. Changing the value afterwards will have no affect on scrub or
+resilver performance.
 .sp
 Default value: \fB3\fR.
 .RE
@@ -1845,12 +1857,12 @@ Default value: \fB3\fR.
 .sp
 .ne 2
 .na
-\fBzfs_scan_direct\fR (int)
+\fBzfs_scan_legacy\fR (int)
 .ad
 .RS 12n
-A value of 1 indicates that scrubs and resilvers will be gathered metadata in
-memory before issuing sequential I/O. A value of 0 indicates that the legacy
-algorithm will be used where I/O will be initiated as soon as it is discovered.
+A value of 0 indicates that scrubs and resilvers will gather metadata in
+memory before issuing sequential I/O. A value of 1 indicates that the legacy
+algorithm will be used where I/O is initiated as soon as it is discovered.
 Changing this value to 0 will not affect scrubs or resilvers that are already
 in progress.
 .sp
