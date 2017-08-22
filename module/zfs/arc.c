@@ -414,6 +414,7 @@ int zfs_arc_p_dampener_disable = 1;
 int zfs_arc_meta_prune = 10000;
 int zfs_arc_meta_strategy = ARC_STRATEGY_META_BALANCED;
 int zfs_arc_meta_adjust_restarts = 4096;
+char *zfs_arc_flush = "";
 
 /* The 6 states: */
 static arc_state_t ARC_anon;
@@ -1007,6 +1008,18 @@ typedef enum arc_fill_flags {
 	ARC_FILL_IN_PLACE	= 1 << 4  /* fill in place (special case) */
 } arc_fill_flags_t;
 
+typedef struct flush_state {
+	uint64_t	pool_guid;
+	boolean_t	arc_mru;
+	boolean_t	arc_mfu;
+	boolean_t	arc_mru_ghost;
+	boolean_t	arc_mfu_ghost;
+	boolean_t	l2arc;
+	boolean_t	data;
+	boolean_t	metadata;
+	boolean_t	retry;
+} flush_state_t;
+
 static kmutex_t l2arc_feed_thr_lock;
 static kcondvar_t l2arc_feed_thr_cv;
 static uint8_t l2arc_thread_exit;
@@ -1032,6 +1045,7 @@ static inline void arc_hdr_clear_flags(arc_buf_hdr_t *hdr, arc_flags_t flags);
 
 static boolean_t l2arc_write_eligible(uint64_t, arc_buf_hdr_t *);
 static void l2arc_read_done(zio_t *);
+static void l2arc_evict(l2arc_dev_t *dev, uint64_t distance, boolean_t all);
 
 static uint64_t
 buf_hash(uint64_t spa, const dva_t *dva, uint64_t birth)
@@ -4599,9 +4613,64 @@ arc_adjust(void)
 	return (total_evicted);
 }
 
+static void
+arc_flush_impl(flush_state_t *fs)
+{
+	uint64_t guid = fs->pool_guid;
+	boolean_t retry = fs->retry;
+
+	if (fs->arc_mru == B_TRUE && fs->data == B_TRUE)
+		(void) arc_flush_state(arc_mru, guid, ARC_BUFC_DATA, retry);
+
+	if (fs->arc_mru == B_TRUE && fs->metadata == B_TRUE)
+		(void) arc_flush_state(arc_mru, guid, ARC_BUFC_METADATA, retry);
+
+	if (fs->arc_mfu == B_TRUE && fs->data == B_TRUE)
+		(void) arc_flush_state(arc_mfu, guid, ARC_BUFC_DATA, retry);
+
+	if (fs->arc_mfu == B_TRUE && fs->metadata == B_TRUE)
+		(void) arc_flush_state(arc_mfu, guid, ARC_BUFC_METADATA, retry);
+
+	if (fs->arc_mru_ghost == B_TRUE && fs->data == B_TRUE)
+		(void) arc_flush_state(arc_mru_ghost, guid, ARC_BUFC_DATA,
+		    retry);
+	if (fs->arc_mru_ghost == B_TRUE && fs->metadata == B_TRUE)
+		(void) arc_flush_state(arc_mru_ghost, guid, ARC_BUFC_METADATA,
+		    retry);
+
+	if (fs->arc_mfu_ghost == B_TRUE && fs->data == B_TRUE)
+		(void) arc_flush_state(arc_mfu_ghost, guid, ARC_BUFC_DATA,
+		    retry);
+	if (fs->arc_mfu_ghost == B_TRUE && fs->metadata == B_TRUE)
+		(void) arc_flush_state(arc_mfu_ghost, guid, ARC_BUFC_METADATA,
+		    retry);
+
+	if (fs->l2arc) {
+		l2arc_dev_t *dev;
+
+		mutex_enter(&spa_namespace_lock);
+		mutex_enter(&l2arc_dev_mtx);
+
+		dev = list_head(l2arc_dev_list);
+		while (dev != NULL) {
+			spa_t *spa = dev->l2ad_spa;
+
+			spa_config_enter(spa, SCL_L2ARC, dev, RW_READER);
+			l2arc_evict(dev, 0, B_TRUE);
+			spa_config_exit(spa, SCL_L2ARC, dev);
+
+			dev = list_next(l2arc_dev_list, dev);
+		}
+
+		mutex_exit(&l2arc_dev_mtx);
+		mutex_exit(&spa_namespace_lock);
+	}
+}
+
 void
 arc_flush(spa_t *spa, boolean_t retry)
 {
+	flush_state_t fs;
 	uint64_t guid = 0;
 
 	/*
@@ -4614,17 +4683,15 @@ arc_flush(spa_t *spa, boolean_t retry)
 	if (spa != NULL)
 		guid = spa_load_guid(spa);
 
-	(void) arc_flush_state(arc_mru, guid, ARC_BUFC_DATA, retry);
-	(void) arc_flush_state(arc_mru, guid, ARC_BUFC_METADATA, retry);
+	memset(&fs, 0, sizeof (flush_state_t));
+	fs.pool_guid = guid;
+	fs.retry = retry;
+	fs.l2arc = B_FALSE;
+	fs.arc_mru = fs.arc_mfu = B_TRUE;
+	fs.arc_mru_ghost = fs.arc_mfu_ghost = B_TRUE;
+	fs.data = fs.metadata = B_TRUE;
 
-	(void) arc_flush_state(arc_mfu, guid, ARC_BUFC_DATA, retry);
-	(void) arc_flush_state(arc_mfu, guid, ARC_BUFC_METADATA, retry);
-
-	(void) arc_flush_state(arc_mru_ghost, guid, ARC_BUFC_DATA, retry);
-	(void) arc_flush_state(arc_mru_ghost, guid, ARC_BUFC_METADATA, retry);
-
-	(void) arc_flush_state(arc_mfu_ghost, guid, ARC_BUFC_DATA, retry);
-	(void) arc_flush_state(arc_mfu_ghost, guid, ARC_BUFC_METADATA, retry);
+	arc_flush_impl(&fs);
 }
 
 void
@@ -8890,6 +8957,168 @@ param_set_arc_tunable(const char *val, zfs_kernel_param_t *kp)
 	return (ret);
 }
 
+/*
+ * The passed string value is expected to include one of the allowed states
+ * listed below and an allowed type.
+ *
+ * Allowed States:
+ * - mru       - Only flush the MRU list
+ * - mfu       - Only flush the MFU list
+ * - mru_ghost - Only flush the MRU ghost list
+ * - mfu_ghost - Only flush the MFU ghost list
+ *
+ * Allowed Types:
+ * - data      - Only flush data
+ * - metadata  - Only flush metadata
+ *
+ * Aliases:
+ * - all-states = mru, mfu, mru_ghost, mfu_ghost
+ * - all-types  = data, metadata
+ * - all        = all-states, all-types
+ */
+enum {
+	TOKEN_STATE_MRU,
+	TOKEN_STATE_MFU,
+	TOKEN_STATE_MRU_GHOST,
+	TOKEN_STATE_MFU_GHOST,
+	TOKEN_STATE_L2ARC,
+	TOKEN_STATE_ALL,
+	TOKEN_TYPE_DATA,
+	TOKEN_TYPE_METADATA,
+	TOKEN_TYPE_ALL,
+	TOKEN_POOL_NAME,
+	TOKEN_ALL,
+	TOKEN_LAST,
+};
+
+static const match_table_t flush_tokens = {
+	{ TOKEN_STATE_MRU,		"mru" },
+	{ TOKEN_STATE_MFU,		"mfu" },
+	{ TOKEN_STATE_MRU_GHOST,	"mru_ghost" },
+	{ TOKEN_STATE_MFU_GHOST,	"mfu_ghost" },
+	{ TOKEN_STATE_L2ARC,		"l2arc" },
+	{ TOKEN_STATE_ALL,		"all-states" },
+	{ TOKEN_TYPE_DATA,		"data" },
+	{ TOKEN_TYPE_METADATA,		"metadata" },
+	{ TOKEN_TYPE_ALL,		"all-types" },
+	{ TOKEN_POOL_NAME,		"pool=%s" },
+	{ TOKEN_ALL,			"all" },
+	{ TOKEN_LAST,			NULL },
+};
+
+static int
+parse_arc_flush(char *option, int token, substring_t *args, flush_state_t *fs)
+{
+	spa_t *spa;
+	char *name = match_strdup(&args[0]);
+	int error = 0;
+
+	switch (token) {
+	case TOKEN_STATE_MRU:
+		fs->arc_mru = B_TRUE;
+		break;
+	case TOKEN_STATE_MFU:
+		fs->arc_mfu = B_TRUE;
+		break;
+	case TOKEN_STATE_MRU_GHOST:
+		fs->arc_mru_ghost = B_TRUE;
+		break;
+	case TOKEN_STATE_MFU_GHOST:
+		fs->arc_mfu_ghost = B_TRUE;
+		break;
+	case TOKEN_STATE_L2ARC:
+		fs->l2arc = B_TRUE;
+		break;
+	case TOKEN_STATE_ALL:
+		fs->arc_mru = fs->arc_mru_ghost = B_TRUE;
+		fs->arc_mfu = fs->arc_mfu_ghost = B_TRUE;
+		fs->l2arc = B_TRUE;
+		break;
+	case TOKEN_TYPE_DATA:
+		fs->data = B_TRUE;
+		break;
+	case TOKEN_TYPE_METADATA:
+		fs->metadata = B_TRUE;
+		break;
+	case TOKEN_TYPE_ALL:
+		fs->data = fs->metadata = B_TRUE;
+		break;
+	case TOKEN_POOL_NAME:
+		name = match_strdup(&args[0]);
+
+		mutex_enter(&spa_namespace_lock);
+		if ((spa = spa_lookup(name)) != NULL)
+			fs->pool_guid = spa_load_guid(spa);
+		else
+			error = SET_ERROR(-ENOENT);
+		mutex_exit(&spa_namespace_lock);
+
+		strfree(name);
+		break;
+	case TOKEN_ALL:
+		fs->arc_mru = fs->arc_mru_ghost = B_TRUE;
+		fs->arc_mfu = fs->arc_mfu_ghost = B_TRUE;
+		fs->l2arc = B_TRUE;
+		fs->data = fs->metadata = B_TRUE;
+	default:
+		break;
+	}
+
+	return (error);
+}
+
+static int
+param_set_arc_flush(const char *val, zfs_kernel_param_t *kp)
+{
+	substring_t args[MAX_OPT_ARGS];
+	flush_state_t fs;
+	char *tmp_val, *p, *t;
+	int error = 0, token;
+
+	if (val == NULL)
+		return (SET_ERROR(-EINVAL));
+
+	tmp_val = t = strdup(val);
+	if (tmp_val == NULL)
+		return (SET_ERROR(-ENOMEM));
+
+	if ((p = strchr(tmp_val, '\n')) != NULL)
+		*p = '\0';
+
+	memset(&fs, 0, sizeof (flush_state_t));
+
+	while ((p = strsep(&t, ",")) != NULL) {
+		if (!*p)
+			continue;
+
+		args[0].to = args[0].from = NULL;
+		token = match_token(p, flush_tokens, args);
+
+		error = parse_arc_flush(p, token, args, &fs);
+		if (error)
+			break;
+	}
+
+	strfree(tmp_val);
+
+	if (fs.data == B_FALSE && fs.metadata == B_FALSE)
+		error = SET_ERROR(-EINVAL);
+
+	if (fs.arc_mru == B_FALSE && fs.arc_mru_ghost == B_FALSE &&
+	    fs.arc_mfu == B_FALSE && fs.arc_mfu_ghost == B_FALSE)
+		error = SET_ERROR(-EINVAL);
+
+	dprintf("ARC flush: mru=%d mfu=%d mru_ghost=%d mfu_ghost=%d l2arc=%d "
+	    "data=%d metadata=%d guid=%llu\n", fs.arc_mru, fs.arc_mfu,
+	    fs.arc_mru_ghost, fs.arc_mfu_ghost, fs.l2arc, fs.data,
+	    fs.metadata, fs.pool_guid);
+
+	if (error == 0)
+		arc_flush_impl(&fs);
+
+	return (error);
+}
+
 /* BEGIN CSTYLED */
 #define MODULE_PARM_ARC_CALLBACK(x, str) \
     module_param_call(x, param_set_arc_tunable, param_get_ulong, &x, 0644); \
@@ -8954,6 +9183,11 @@ MODULE_PARM_DESC(zfs_arc_dnode_reduce_percent,
 module_param(zfs_arc_average_blocksize, ulong, 0444);
 MODULE_PARM_DESC(zfs_arc_average_blocksize,
     "Target average block size");
+
+module_param_call(zfs_arc_flush, param_set_arc_flush, param_get_charp,
+    &zfs_arc_flush, 0644);
+MODULE_PARM_DESC(zfs_arc_flush,
+    "A string describing what to flush from the ARC");
 
 /* L2ARC Tunings */
 module_param(l2arc_write_max, ulong, 0644);
