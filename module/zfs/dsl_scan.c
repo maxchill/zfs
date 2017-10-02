@@ -124,12 +124,9 @@ int zfs_scan_strict_mem_lim = B_FALSE;
 /*
  * Maximum number of parallelly executing I/Os per top-level vdev.
  * Tune with care. Very high settings (hundreds) are known to trigger
- * some firmware bugs and resets on certain SSDs. Only used for legacy
- * scrubs. Sequential scrubs use zfs_scan_leaf_maxinflight.
+ * some firmware bugs and resets on certain SSDs.
  */
 int zfs_top_maxinflight = 32;
-int zfs_scan_md_maxinflight = 1024;
-int zfs_scan_leaf_maxinflight = 50;
 
 int zfs_scan_issue_strategy = 0;
 int zfs_scan_legacy = B_FALSE;	/* don't queue & sort zios, go direct */
@@ -363,9 +360,6 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 	scn = dp->dp_scan = kmem_zalloc(sizeof (dsl_scan_t), KM_SLEEP);
 	scn->scn_dp = dp;
 
-	mutex_init(&scn->scn_prefetch_lock, NULL, MUTEX_DEFAULT, NULL);
-	cv_init(&scn->scn_prefetch_cv, NULL, CV_DEFAULT, NULL);
-
 	/*
 	 * It's possible that we're resuming a scan after a reboot so
 	 * make sure that the scan_async_destroying flag is initialized
@@ -495,8 +489,6 @@ dsl_scan_fini(dsl_pool_t *dp)
 	if (dp->dp_scan != NULL) {
 		dsl_scan_t *scn = dp->dp_scan;
 
-		mutex_destroy(&scn->scn_prefetch_lock);
-		cv_destroy(&scn->scn_prefetch_cv);
 		avl_destroy(&scn->scn_prefetch_queue);
 		if (scn->scn_taskq != NULL)
 			taskq_destroy(scn->scn_taskq);
@@ -1351,6 +1343,7 @@ dsl_scan_prefetch(scan_prefetch_ctx_t *spc, blkptr_t *bp, zbookmark_phys_t *zb)
 {
 	avl_index_t idx;
 	dsl_scan_t *scn = spc->spc_scn;
+	spa_t *spa = scn->scn_dp->dp_spa;
 	scan_prefetch_issue_ctx_t *spic;
 
 	if (zfs_no_scrub_prefetch)
@@ -1375,19 +1368,18 @@ dsl_scan_prefetch(scan_prefetch_ctx_t *spc, blkptr_t *bp, zbookmark_phys_t *zb)
 	 * prioritize blocks that we will need first for the main traversal
 	 * thread.
 	 */
-	mutex_enter(&scn->scn_prefetch_lock);
+	mutex_enter(&spa->spa_scrub_lock);
 	if (avl_find(&scn->scn_prefetch_queue, spic, &idx) != NULL) {
 		/* this block is already queued for prefetch */
 		kmem_free(spic, sizeof (scan_prefetch_issue_ctx_t));
 		scan_prefetch_ctx_rele(spc, scn);
-		mutex_exit(&scn->scn_prefetch_lock);
+		mutex_exit(&spa->spa_scrub_lock);
 		return;
 	}
 
 	avl_insert(&scn->scn_prefetch_queue, spic, idx);
-
-	cv_broadcast(&scn->scn_prefetch_cv);
-	mutex_exit(&scn->scn_prefetch_lock);
+	cv_broadcast(&spa->spa_scrub_io_cv);
+	mutex_exit(&spa->spa_scrub_lock);
 }
 
 static void
@@ -1426,13 +1418,14 @@ dsl_scan_prefetch_cb(zio_t *zio, const zbookmark_phys_t *zb, const blkptr_t *bp,
 {
 	scan_prefetch_ctx_t *spc = private;
 	dsl_scan_t *scn = spc->spc_scn;
+	spa_t *spa = scn->scn_dp->dp_spa;
 
 	/* broadcast that the IO has completed for rate limitting purposes */
-	mutex_enter(&scn->scn_prefetch_lock);
-	ASSERT3U(scn->scn_prefetch_inflight, >, 0);
-	scn->scn_prefetch_inflight--;
-	cv_broadcast(&scn->scn_prefetch_cv);
-	mutex_exit(&scn->scn_prefetch_lock);
+	mutex_enter(&spa->spa_scrub_lock);
+	ASSERT3U(spa->spa_scrub_inflight, >, 0);
+	spa->spa_scrub_inflight--;
+	cv_broadcast(&spa->spa_scrub_io_cv);
+	mutex_exit(&spa->spa_scrub_lock);
 
 	/* if there was an error or we are done prefetching, just cleanup */
 	if (buf == NULL || scn->scn_suspending)
@@ -1487,7 +1480,9 @@ static void
 dsl_scan_prefetch_thread(void *arg)
 {
 	dsl_scan_t *scn = arg;
-	uint64_t maxinflight = zfs_scan_md_maxinflight;
+	spa_t *spa = scn->scn_dp->dp_spa;
+	vdev_t *rvd = spa->spa_root_vdev;
+	uint64_t maxinflight = rvd->vdev_children * zfs_top_maxinflight;
 	scan_prefetch_issue_ctx_t *spic;
 
 	/* loop until we are told to stop */
@@ -1496,7 +1491,7 @@ dsl_scan_prefetch_thread(void *arg)
 		    ARC_FLAG_NOWAIT | ARC_FLAG_LONG_LIFE | ARC_FLAG_PREFETCH;
 		int zio_flags = ZIO_FLAG_CANFAIL | ZIO_FLAG_SCAN_THREAD;
 
-		mutex_enter(&scn->scn_prefetch_lock);
+		mutex_enter(&spa->spa_scrub_lock);
 
 		/*
 		 * Wait until we have an IO to issue and are not above our
@@ -1504,22 +1499,22 @@ dsl_scan_prefetch_thread(void *arg)
 		 */
 		while (!scn->scn_prefetch_stop &&
 		    (avl_numnodes(&scn->scn_prefetch_queue) == 0 ||
-		    scn->scn_prefetch_inflight >= maxinflight)) {
-			cv_wait(&scn->scn_prefetch_cv, &scn->scn_prefetch_lock);
+		    spa->spa_scrub_inflight >= maxinflight)) {
+			cv_wait(&spa->spa_scrub_io_cv, &spa->spa_scrub_lock);
 		}
 
 		/* recheck if we should stop since we waited for the cv */
 		if (scn->scn_prefetch_stop) {
-			mutex_exit(&scn->scn_prefetch_lock);
+			mutex_exit(&spa->spa_scrub_lock);
 			break;
 		}
 
 		/* remove the prefetch IO from the tree */
-		scn->scn_prefetch_inflight++;
+		spa->spa_scrub_inflight++;
 		spic = avl_first(&scn->scn_prefetch_queue);
 		avl_remove(&scn->scn_prefetch_queue, spic);
 
-		mutex_exit(&scn->scn_prefetch_lock);
+		mutex_exit(&spa->spa_scrub_lock);
 
 		if (BP_IS_PROTECTED(&spic->spic_bp)) {
 			ASSERT(BP_GET_TYPE(&spic->spic_bp) == DMU_OT_DNODE ||
@@ -1539,14 +1534,14 @@ dsl_scan_prefetch_thread(void *arg)
 	ASSERT(scn->scn_prefetch_stop);
 
 	/* free any prefetches we didn't get to complete */
-	mutex_enter(&scn->scn_prefetch_lock);
+	mutex_enter(&spa->spa_scrub_lock);
 	while ((spic = avl_first(&scn->scn_prefetch_queue)) != NULL) {
 		avl_remove(&scn->scn_prefetch_queue, spic);
 		scan_prefetch_ctx_rele(spic->spic_spc, scn);
 		kmem_free(spic, sizeof (scan_prefetch_issue_ctx_t));
 	}
 	ASSERT0(avl_numnodes(&scn->scn_prefetch_queue));
-	mutex_exit(&scn->scn_prefetch_lock);
+	mutex_exit(&spa->spa_scrub_lock);
 }
 
 static boolean_t
@@ -3201,10 +3196,10 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		dsl_scan_visit(scn, tx);
 		dsl_pool_config_exit(dp, FTAG);
 
-		mutex_enter(&scn->scn_prefetch_lock);
+		mutex_enter(&dp->dp_spa->spa_scrub_lock);
 		scn->scn_prefetch_stop = B_TRUE;
-		cv_broadcast(&scn->scn_prefetch_cv);
-		mutex_exit(&scn->scn_prefetch_lock);
+		cv_broadcast(&spa->spa_scrub_io_cv);
+		mutex_exit(&dp->dp_spa->spa_scrub_lock);
 
 		taskq_wait_id(dp->dp_sync_taskq, prefetch_tqid);
 		(void) zio_wait(scn->scn_zio_root);
@@ -3517,9 +3512,10 @@ scan_exec_io(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
 	size_t size = BP_GET_PSIZE(bp);
 	vdev_t *rvd = spa->spa_root_vdev;
 	abd_t *data = abd_alloc_for_io(size, B_FALSE);
+	uint64_t maxinflight;
 
 	if (queue == NULL) {
-		uint64_t maxinflight = rvd->vdev_children * zfs_top_maxinflight;
+		maxinflight = rvd->vdev_children * zfs_top_maxinflight;
 
 		mutex_enter(&spa->spa_scrub_lock);
 		while (spa->spa_scrub_inflight >= maxinflight)
@@ -3527,10 +3523,8 @@ scan_exec_io(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
 		spa->spa_scrub_inflight++;
 		mutex_exit(&spa->spa_scrub_lock);
 	} else {
-		uint64_t child_cnt = (queue->q_vd->vdev_children != 0) ?
-		    queue->q_vd->vdev_children : 1;
-		uint64_t maxinflight = zfs_scan_leaf_maxinflight * child_cnt;
 		kmutex_t *q_lock = &queue->q_vd->vdev_scan_io_queue_lock;
+		maxinflight = zfs_top_maxinflight;
 
 		mutex_enter(q_lock);
 		while (queue->q_num_inflight_zios >= maxinflight)
@@ -3876,14 +3870,6 @@ dsl_scan_freed(spa_t *spa, const blkptr_t *bp)
 module_param(zfs_top_maxinflight, int, 0644);
 MODULE_PARM_DESC(zfs_top_maxinflight,
 	"Max I/Os per top-level vdev for legacy scrubs");
-
-module_param(zfs_scan_md_maxinflight, int, 0644);
-MODULE_PARM_DESC(zfs_scan_md_maxinflight,
-	"Max I/Os per leaf vdev for metadata scanning");
-
-module_param(zfs_scan_leaf_maxinflight, int, 0644);
-MODULE_PARM_DESC(zfs_scan_leaf_maxinflight,
-	"Max I/Os per leaf vdev for scrubs");
 
 module_param(zfs_scrub_min_time_ms, int, 0644);
 MODULE_PARM_DESC(zfs_scrub_min_time_ms, "Min millisecs to scrub per txg");
