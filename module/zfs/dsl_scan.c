@@ -3187,7 +3187,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		(void) dsl_scan_should_clear(scn);
 		dsl_scan_update_stats(scn);
 
-		zfs_dbgmsg("scrubbed %llu blocks (%llu segs) in %llums "
+		zfs_dbgmsg("scan issued %llu blocks (%llu segs) in %llums "
 		    "(avg_block_size = %llu, avg_seg_size = %llu)",
 		    (longlong_t)scn->scn_zios_this_txg,
 		    (longlong_t)scn->scn_segs_this_txg,
@@ -3197,7 +3197,8 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    (longlong_t)scn->scn_avg_seg_size_this_txg);
 	} else if (scn->scn_done_txg != 0 && scn->scn_done_txg <= tx->tx_txg) {
 		/* Finished with everything. Mark the scrub as complete */
-		zfs_dbgmsg("txg %llu scrub complete", (longlong_t)tx->tx_txg);
+		zfs_dbgmsg("scan issuing complete txg %llu",
+		    (longlong_t)tx->tx_txg);
 		ASSERT3U(scn->scn_done_txg, !=, 0);
 		ASSERT0(spa->spa_scrub_inflight);
 		ASSERT0(scn->scn_bytes_pending);
