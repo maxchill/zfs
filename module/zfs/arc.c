@@ -357,8 +357,8 @@ int			arc_no_grow_shift = 5;
  * minimum lifespan of a prefetch block in clock ticks
  * (initialized in arc_init())
  */
-static int		arc_min_prefetch_lifespan;
-static int		arc_min_long_lifespan;
+static int		arc_min_prefetch_ms;
+static int		arc_min_prescient_prefetch_ms;
 
 /*
  * If this percent of memory is free, don't throttle.
@@ -408,8 +408,8 @@ unsigned long zfs_arc_dnode_limit_percent = 10;
  * These tunables are Linux specific
  */
 unsigned long zfs_arc_sys_free = 0;
-int zfs_arc_min_prefetch_lifespan = 0;
-int zfs_arc_min_long_lifespan = 0;
+int zfs_arc_min_prefetch_ms = 0;
+int zfs_arc_min_prescient_prefetch_ms = 0;
 int zfs_arc_p_aggressive_disable = 1;
 int zfs_arc_p_dampener_disable = 1;
 int zfs_arc_meta_prune = 10000;
@@ -665,6 +665,7 @@ typedef struct arc_stats {
 	kstat_named_t arcstat_meta_min;
 	kstat_named_t arcstat_sync_wait_for_async;
 	kstat_named_t arcstat_demand_hit_predictive_prefetch;
+	kstat_named_t arcstat_demand_hit_prescient_prefetch;
 	kstat_named_t arcstat_need_free;
 	kstat_named_t arcstat_sys_free;
 	kstat_named_t arcstat_raw_size;
@@ -764,6 +765,7 @@ static arc_stats_t arc_stats = {
 	{ "arc_meta_min",		KSTAT_DATA_UINT64 },
 	{ "sync_wait_for_async",	KSTAT_DATA_UINT64 },
 	{ "demand_hit_predictive_prefetch", KSTAT_DATA_UINT64 },
+	{ "demand_hit_prescient_prefetch", KSTAT_DATA_UINT64 },
 	{ "arc_need_free",		KSTAT_DATA_UINT64 },
 	{ "arc_sys_free",		KSTAT_DATA_UINT64 },
 	{ "arc_raw_size",		KSTAT_DATA_UINT64 }
@@ -863,7 +865,8 @@ static taskq_t *arc_prune_taskq;
 #define	HDR_IO_IN_PROGRESS(hdr)	((hdr)->b_flags & ARC_FLAG_IO_IN_PROGRESS)
 #define	HDR_IO_ERROR(hdr)	((hdr)->b_flags & ARC_FLAG_IO_ERROR)
 #define	HDR_PREFETCH(hdr)	((hdr)->b_flags & ARC_FLAG_PREFETCH)
-#define	HDR_LONG_LIFE(hdr)	((hdr)->b_flags & ARC_FLAG_LONG_LIFE)
+#define	HDR_PRESCIENT_PREFETCH(hdr)	\
+	((hdr)->b_flags & ARC_FLAG_PRESCIENT_PREFETCH)
 #define	HDR_COMPRESSION_ENABLED(hdr)	\
 	((hdr)->b_flags & ARC_FLAG_COMPRESSED_ARC)
 
@@ -3782,8 +3785,8 @@ arc_evict_hdr(arc_buf_hdr_t *hdr, kmutex_t *hash_lock)
 {
 	arc_state_t *evicted_state, *state;
 	int64_t bytes_evicted = 0;
-	int min_lifetime = HDR_LONG_LIFE(hdr) ?
-	    arc_min_long_lifespan : arc_min_prefetch_lifespan;
+	int min_lifetime = HDR_PRESCIENT_PREFETCH(hdr) ?
+	    arc_min_prescient_prefetch_ms : arc_min_prefetch_ms;
 
 	ASSERT(MUTEX_HELD(hash_lock));
 	ASSERT(HDR_HAS_L1HDR(hdr));
@@ -3837,7 +3840,7 @@ arc_evict_hdr(arc_buf_hdr_t *hdr, kmutex_t *hash_lock)
 	/* prefetch buffers have a minimum lifespan */
 	if (HDR_IO_IN_PROGRESS(hdr) ||
 	    ((hdr->b_flags & (ARC_FLAG_PREFETCH | ARC_FLAG_INDIRECT)) &&
-	    ddi_get_lbolt() - hdr->b_l1hdr.b_arc_access < min_lifetime)) {
+	    ddi_get_lbolt() - hdr->b_l1hdr.b_arc_access < min_lifetime * hz)) {
 		ARCSTAT_BUMP(arcstat_evict_skip);
 		return (bytes_evicted);
 	}
@@ -5498,14 +5501,15 @@ arc_access(arc_buf_hdr_t *hdr, kmutex_t *hash_lock)
 		 * - move the buffer to the head of the list if this is
 		 *   another prefetch (to make it less likely to be evicted).
 		 */
-		if (HDR_PREFETCH(hdr) || HDR_LONG_LIFE(hdr)) {
+		if (HDR_PREFETCH(hdr) || HDR_PRESCIENT_PREFETCH(hdr)) {
 			if (refcount_count(&hdr->b_l1hdr.b_refcnt) == 0) {
 				/* link protected by hash lock */
 				ASSERT(multilist_link_active(
 				    &hdr->b_l1hdr.b_arc_node));
 			} else {
 				arc_hdr_clear_flags(hdr,
-				    ARC_FLAG_PREFETCH | ARC_FLAG_LONG_LIFE);
+				    ARC_FLAG_PREFETCH |
+				    ARC_FLAG_PRESCIENT_PREFETCH);
 				atomic_inc_32(&hdr->b_l1hdr.b_mru_hits);
 				ARCSTAT_BUMP(arcstat_mru_hits);
 			}
@@ -5539,11 +5543,12 @@ arc_access(arc_buf_hdr_t *hdr, kmutex_t *hash_lock)
 		 * MFU state.
 		 */
 
-		if (HDR_PREFETCH(hdr) || HDR_LONG_LIFE(hdr)) {
+		if (HDR_PREFETCH(hdr) || HDR_PRESCIENT_PREFETCH(hdr)) {
 			new_state = arc_mru;
 			if (refcount_count(&hdr->b_l1hdr.b_refcnt) > 0) {
 				arc_hdr_clear_flags(hdr,
-				    ARC_FLAG_PREFETCH | ARC_FLAG_LONG_LIFE);
+				    ARC_FLAG_PREFETCH |
+				    ARC_FLAG_PRESCIENT_PREFETCH);
 			}
 			DTRACE_PROBE1(new_state__mru, arc_buf_hdr_t *, hdr);
 		} else {
@@ -5578,7 +5583,7 @@ arc_access(arc_buf_hdr_t *hdr, kmutex_t *hash_lock)
 		 * MFU state.
 		 */
 
-		if (HDR_PREFETCH(hdr) || HDR_LONG_LIFE(hdr)) {
+		if (HDR_PREFETCH(hdr) || HDR_PRESCIENT_PREFETCH(hdr)) {
 			/*
 			 * This is a prefetch access...
 			 * move this block back to the MRU state.
@@ -5988,6 +5993,14 @@ top:
 				arc_hdr_clear_flags(hdr,
 				    ARC_FLAG_PREDICTIVE_PREFETCH);
 			}
+
+			if (hdr->b_flags & ARC_FLAG_PRESCIENT_PREFETCH) {
+				ARCSTAT_BUMP(
+				    arcstat_demand_hit_prescient_prefetch);
+				arc_hdr_clear_flags(hdr,
+				    ARC_FLAG_PRESCIENT_PREFETCH);
+			}
+
 			ASSERT(!BP_IS_EMBEDDED(bp) || !BP_IS_HOLE(bp));
 
 			/* Get a buf with the desired data in it. */
@@ -6006,8 +6019,8 @@ top:
 		}
 		DTRACE_PROBE1(arc__hit, arc_buf_hdr_t *, hdr);
 		arc_access(hdr, hash_lock);
-		if (*arc_flags & ARC_FLAG_LONG_LIFE)
-			arc_hdr_set_flags(hdr, ARC_FLAG_LONG_LIFE);
+		if (*arc_flags & ARC_FLAG_PRESCIENT_PREFETCH)
+			arc_hdr_set_flags(hdr, ARC_FLAG_PRESCIENT_PREFETCH);
 		if (*arc_flags & ARC_FLAG_L2CACHE)
 			arc_hdr_set_flags(hdr, ARC_FLAG_L2CACHE);
 		mutex_exit(hash_lock);
@@ -6133,8 +6146,8 @@ top:
 		if (*arc_flags & ARC_FLAG_PREFETCH &&
 		    refcount_is_zero(&hdr->b_l1hdr.b_refcnt))
 			arc_hdr_set_flags(hdr, ARC_FLAG_PREFETCH);
-		if (*arc_flags & ARC_FLAG_LONG_LIFE)
-			arc_hdr_set_flags(hdr, ARC_FLAG_LONG_LIFE);
+		if (*arc_flags & ARC_FLAG_PRESCIENT_PREFETCH)
+			arc_hdr_set_flags(hdr, ARC_FLAG_PRESCIENT_PREFETCH);
 		if (*arc_flags & ARC_FLAG_L2CACHE)
 			arc_hdr_set_flags(hdr, ARC_FLAG_L2CACHE);
 		if (BP_IS_AUTHENTICATED(bp))
@@ -7247,13 +7260,15 @@ arc_tuning_update(void)
 	if (zfs_arc_p_min_shift)
 		arc_p_min_shift = zfs_arc_p_min_shift;
 
-	/* Valid range: 1 - N ticks */
-	if (zfs_arc_min_prefetch_lifespan)
-		arc_min_prefetch_lifespan = zfs_arc_min_prefetch_lifespan;
+	/* Valid range: 1 - N ms */
+	if (zfs_arc_min_prefetch_ms)
+		arc_min_prefetch_ms = zfs_arc_min_prefetch_ms;
 
-	/* Valid range: 1 - N ticks */
-	if (zfs_arc_min_long_lifespan)
-		arc_min_long_lifespan = zfs_arc_min_long_lifespan;
+	/* Valid range: 1 - N ms */
+	if (zfs_arc_min_prescient_prefetch_ms) {
+		arc_min_prescient_prefetch_ms =
+		    zfs_arc_min_prescient_prefetch_ms;
+	}
 
 	/* Valid range: 0 - 100 */
 	if ((zfs_arc_lotsfree_percent >= 0) &&
@@ -7396,8 +7411,8 @@ arc_init(void)
 	cv_init(&arc_reclaim_waiters_cv, NULL, CV_DEFAULT, NULL);
 
 	/* Convert seconds to clock ticks */
-	arc_min_prefetch_lifespan = 1 * hz;
-	arc_min_long_lifespan = 6 * hz;
+	arc_min_prefetch_ms = 1;
+	arc_min_prescient_prefetch_ms = 6;
 
 #ifdef _KERNEL
 	/*
@@ -9036,11 +9051,12 @@ MODULE_PARM_DESC(zfs_arc_average_blocksize, "Target average block size");
 module_param(zfs_compressed_arc_enabled, int, 0644);
 MODULE_PARM_DESC(zfs_compressed_arc_enabled, "Disable compressed arc buffers");
 
-module_param(zfs_arc_min_prefetch_lifespan, int, 0644);
-MODULE_PARM_DESC(zfs_arc_min_prefetch_lifespan, "Min life of prefetch block");
+module_param(zfs_arc_min_prefetch_ms, int, 0644);
+MODULE_PARM_DESC(zfs_arc_min_prefetch_ms, "Min life of prefetch block in ms");
 
-module_param(zfs_arc_min_long_lifespan, int, 0644);
-MODULE_PARM_DESC(zfs_arc_min_long_lifespan, "Min life of long-lived block");
+module_param(zfs_arc_min_prescient_prefetch_ms, int, 0644);
+MODULE_PARM_DESC(zfs_arc_min_prescient_prefetch_ms,
+	"Min life of prescient prefetched block in ms");
 
 module_param(l2arc_write_max, ulong, 0644);
 MODULE_PARM_DESC(l2arc_write_max, "Max write bytes per interval");

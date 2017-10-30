@@ -124,8 +124,7 @@ run_and_verify -p "$MPOOL" -d 10 \
     -e "sysevent.fs.zfs.vdev_remove" \
     -e "sysevent.fs.zfs.history_event" \
     -e "sysevent.fs.zfs.config_sync" \
-    "zpool replace -f $MPOOL $VDEV1 $VDEV4 && \
-    while ! is_pool_resilvered $MPOOL; do sleep 1; done"
+    "zpool replace -f $MPOOL $VDEV1 $VDEV4"
 
 # Scrub a pool.
 run_and_verify -p "$MPOOL" -d 10 \

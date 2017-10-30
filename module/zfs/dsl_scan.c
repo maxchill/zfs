@@ -1469,8 +1469,8 @@ dsl_scan_prefetch_thread(void *arg)
 
 	/* loop until we are told to stop */
 	while (!scn->scn_prefetch_stop) {
-		arc_flags_t flags =
-		    ARC_FLAG_NOWAIT | ARC_FLAG_LONG_LIFE | ARC_FLAG_PREFETCH;
+		arc_flags_t flags = ARC_FLAG_NOWAIT |
+		    ARC_FLAG_PRESCIENT_PREFETCH | ARC_FLAG_PREFETCH;
 		int zio_flags = ZIO_FLAG_CANFAIL | ZIO_FLAG_SCAN_THREAD;
 
 		mutex_enter(&spa->spa_scrub_lock);
