@@ -2478,14 +2478,14 @@ scan_io_queues_update_seg_stats(dsl_scan_io_queue_t *q, uint64_t start,
 static boolean_t
 scan_io_queue_check_suspend(dsl_scan_t *scn)
 {
-	uint64_t elapsed_nanosecs = gethrtime() - scn->scn_sync_start_time;
+	spa_t *spa = scn->scn_dp->dp_spa;
+	uint64_t elapsed_sync_time_ns = gethrtime() - spa->spa_sync_starttime;
 	uint64_t mintime = (scn->scn_phys.scn_func == POOL_SCAN_RESILVER) ?
 	    zfs_resilver_min_time_ms : zfs_scrub_min_time_ms;
 
-	return (elapsed_nanosecs / NANOSEC > zfs_txg_timeout ||
-	    (NSEC2MSEC(elapsed_nanosecs) > mintime &&
-	    txg_sync_waiting(scn->scn_dp)) ||
-	    spa_shutting_down(scn->scn_dp->dp_spa));
+	return (NSEC2SEC(elapsed_sync_time_ns) > zfs_txg_timeout ||
+	    (NSEC2MSEC(elapsed_sync_time_ns) > mintime &&
+	    txg_sync_waiting(scn->scn_dp)) || spa_shutting_down(spa));
 }
 
 /*
@@ -2902,12 +2902,6 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    func, (longlong_t)tx->tx_txg);
 		dsl_scan_setup_sync(&func, tx);
 	}
-
-	/*
-	 * Only process scans in sync pass 1.
-	 */
-	if (spa_sync_pass(dp->dp_spa) > 1)
-		return;
 
 	/*
 	 * If the spa is shutting down, then stop scanning. This will

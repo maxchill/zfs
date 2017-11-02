@@ -6919,7 +6919,6 @@ spa_sync(spa_t *spa, uint64_t txg)
 		}
 
 		ddt_sync(spa, txg);
-		dsl_scan_sync(dp, tx);
 
 		while ((vd = txg_list_remove(&spa->spa_vdev_txg_list, txg)))
 			vdev_sync(vd, txg);
@@ -6945,15 +6944,19 @@ spa_sync(spa_t *spa, uint64_t txg)
 				 * Nothing changed on the first pass,
 				 * therefore this TXG is a no-op.  Avoid
 				 * syncing deferred frees, so that we
-				 * can keep this TXG as a no-op.
+				 * can keep this TXG as a no-op.  However,
+				 * if a scan is running allow the frees.
 				 */
 				ASSERT(txg_list_empty(&dp->dp_dirty_datasets,
 				    txg));
 				ASSERT(txg_list_empty(&dp->dp_dirty_dirs, txg));
 				ASSERT(txg_list_empty(&dp->dp_sync_tasks, txg));
-				break;
+
+				if (!dsl_scan_active(dp->dp_scan))
+					break;
 			}
 			spa_sync_deferred_frees(spa, tx);
+			dsl_scan_sync(dp, tx);
 		}
 
 	} while (dmu_objset_is_dirty(mos, txg));
