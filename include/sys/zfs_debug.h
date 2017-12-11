@@ -30,6 +30,8 @@
 extern "C" {
 #endif
 
+#include <sys/time.h>
+
 #ifndef TRUE
 #define	TRUE 1
 #endif
@@ -52,30 +54,45 @@ extern int zfs_free_leak_on_eio;
 #define	ZFS_DEBUG_HISTOGRAM_VERIFY	(1 << 7)
 #define	ZFS_DEBUG_METASLAB_VERIFY	(1 << 8)
 #define	ZFS_DEBUG_SET_ERROR		(1 << 9)
+#define	ZFS_DEBUG_ARC_WATCH		(1 << 10)
+
+#define	ZFS_DEBUG_MASK \
+	(ZFS_DEBUG_DPRINTF | ZFS_DEBUG_DBUF_VERIFY | ZFS_DEBUG_DNODE_VERIFY | \
+	ZFS_DEBUG_SNAPNAMES | ZFS_DEBUG_MODIFY | ZFS_DEBUG_SPA | \
+	ZFS_DEBUG_ZIO_FREE | ZFS_DEBUG_HISTOGRAM_VERIFY | \
+	ZFS_DEBUG_METASLAB_VERIFY | ZFS_DEBUG_SET_ERROR)
+
+#define	DPRINTF_TIME			(1 << 0)
+#define	DPRINTF_PID			(1 << 1)
+#define	DPRINTF_CPU			(1 << 2)
+#define	DPRINTF_FFL			(1 << 3)
+
+#define	DPRINTF_MASK \
+	(DPRINTF_TIME | DPRINTF_PID | DPRINTF_CPU | DPRINTF_FFL)
 
 extern void __dprintf(const char *file, const char *func,
     int line, const char *fmt, ...);
 #define	dprintf(...) \
-	__dprintf(__FILE__, __func__, __LINE__, __VA_ARGS__)
-#define	zfs_dbgmsg(...) \
-	__dprintf(__FILE__, __func__, __LINE__, __VA_ARGS__)
+	if (zfs_flags & (ZFS_DEBUG_DPRINTF | ZFS_DEBUG_SET_ERROR)) \
+		__dprintf(__FILE__, __func__, __LINE__, __VA_ARGS__)
 
 extern void zfs_panic_recover(const char *fmt, ...);
 
 typedef struct zfs_dbgmsg {
 	list_node_t zdm_node;
-	time_t zdm_timestamp;
-	int zdm_size;
-	char zdm_msg[1]; /* variable length allocation */
+	uint64_t zdm_timestamp;
+	uint32_t zdm_size;
+	uint32_t zdm_cpu;
+	pid_t zdm_pid;
+	pid_t zdm_tid;
+	char *zdm_ffl;
+	char *zdm_msg;
 } zfs_dbgmsg_t;
 
 extern void zfs_dbgmsg_init(void);
 extern void zfs_dbgmsg_fini(void);
-
-#ifndef _KERNEL
-extern int dprintf_find_string(const char *string);
+extern void zfs_dbgmsg(const char *fmt, ...);
 extern void zfs_dbgmsg_print(const char *tag);
-#endif
 
 #ifdef	__cplusplus
 }

@@ -27,7 +27,7 @@
 #ifndef _LIBSPL_SYS_PROCESSOR_H
 #define	_LIBSPL_SYS_PROCESSOR_H
 
-#define	getcpuid() (-1)
+#define	getcpuid()	sched_getcpu()
 
 typedef int	processorid_t;
 

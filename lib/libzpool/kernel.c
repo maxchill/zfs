@@ -649,121 +649,6 @@ fop_getattr(vnode_t *vp, vattr_t *vap)
 
 /*
  * =========================================================================
- * Figure out which debugging statements to print
- * =========================================================================
- */
-
-static char *dprintf_string;
-static int dprintf_print_all;
-
-int
-dprintf_find_string(const char *string)
-{
-	char *tmp_str = dprintf_string;
-	int len = strlen(string);
-
-	/*
-	 * Find out if this is a string we want to print.
-	 * String format: file1.c,function_name1,file2.c,file3.c
-	 */
-
-	while (tmp_str != NULL) {
-		if (strncmp(tmp_str, string, len) == 0 &&
-		    (tmp_str[len] == ',' || tmp_str[len] == '\0'))
-			return (1);
-		tmp_str = strchr(tmp_str, ',');
-		if (tmp_str != NULL)
-			tmp_str++; /* Get rid of , */
-	}
-	return (0);
-}
-
-void
-dprintf_setup(int *argc, char **argv)
-{
-	int i, j;
-
-	/*
-	 * Debugging can be specified two ways: by setting the
-	 * environment variable ZFS_DEBUG, or by including a
-	 * "debug=..."  argument on the command line.  The command
-	 * line setting overrides the environment variable.
-	 */
-
-	for (i = 1; i < *argc; i++) {
-		int len = strlen("debug=");
-		/* First look for a command line argument */
-		if (strncmp("debug=", argv[i], len) == 0) {
-			dprintf_string = argv[i] + len;
-			/* Remove from args */
-			for (j = i; j < *argc; j++)
-				argv[j] = argv[j+1];
-			argv[j] = NULL;
-			(*argc)--;
-		}
-	}
-
-	if (dprintf_string == NULL) {
-		/* Look for ZFS_DEBUG environment variable */
-		dprintf_string = getenv("ZFS_DEBUG");
-	}
-
-	/*
-	 * Are we just turning on all debugging?
-	 */
-	if (dprintf_find_string("on"))
-		dprintf_print_all = 1;
-
-	if (dprintf_string != NULL)
-		zfs_flags |= ZFS_DEBUG_DPRINTF;
-}
-
-/*
- * =========================================================================
- * debug printfs
- * =========================================================================
- */
-void
-__dprintf(const char *file, const char *func, int line, const char *fmt, ...)
-{
-	const char *newfile;
-	va_list adx;
-
-	/*
-	 * Get rid of annoying "../common/" prefix to filename.
-	 */
-	newfile = strrchr(file, '/');
-	if (newfile != NULL) {
-		newfile = newfile + 1; /* Get rid of leading / */
-	} else {
-		newfile = file;
-	}
-
-	if (dprintf_print_all ||
-	    dprintf_find_string(newfile) ||
-	    dprintf_find_string(func)) {
-		/* Print out just the function name if requested */
-		flockfile(stdout);
-		if (dprintf_find_string("pid"))
-			(void) printf("%d ", getpid());
-		if (dprintf_find_string("tid"))
-			(void) printf("%u ", (uint_t)pthread_self());
-		if (dprintf_find_string("cpu"))
-			(void) printf("%u ", getcpuid());
-		if (dprintf_find_string("time"))
-			(void) printf("%llu ", gethrtime());
-		if (dprintf_find_string("long"))
-			(void) printf("%s, line %d: ", newfile, line);
-		(void) printf("%s: ", func);
-		va_start(adx, fmt);
-		(void) vprintf(fmt, adx);
-		va_end(adx);
-		funlockfile(stdout);
-	}
-}
-
-/*
- * =========================================================================
  * cmn_err() and panic()
  * =========================================================================
  */
@@ -1010,9 +895,6 @@ kernel_init(int mode)
 
 	physmem = sysconf(_SC_PHYS_PAGES);
 
-	dprintf("physmem = %llu pages (%.2f GB)\n", physmem,
-	    (double)physmem * sysconf(_SC_PAGE_SIZE) / (1ULL << 30));
-
 	(void) snprintf(hw_serial, sizeof (hw_serial), "%ld",
 	    (mode & FWRITE) ? get_system_hostid() : 0);
 
@@ -1028,6 +910,9 @@ kernel_init(int mode)
 	fletcher_4_init();
 
 	tsd_create(&rrw_tsd_key, rrw_tsd_destroy);
+
+	dprintf("physmem = %llu pages (%.2f GB)\n", physmem,
+	    (double)physmem * sysconf(_SC_PAGE_SIZE) / (1ULL << 30));
 }
 
 void

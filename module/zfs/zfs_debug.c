@@ -25,33 +25,54 @@
 
 #include <sys/zfs_context.h>
 #include <sys/kstat.h>
+#include <sys/processor.h>
 
 list_t zfs_dbgmsgs;
-int zfs_dbgmsg_size = 0;
 kmutex_t zfs_dbgmsgs_lock;
-int zfs_dbgmsg_maxsize = 4<<20; /* 4MB */
 kstat_t *zfs_dbgmsg_kstat;
+unsigned int zfs_dbgmsg_size = 0;
 
 /*
- * By default only enable the internal ZFS debug messages when running
- * in userspace (ztest).  The kernel log must be manually enabled.
+ * By default enable the internal ZFS debug log.  The log will contain
+ * messages from the dprintf() and zfs_logmsg() log functions.
  *
- * # Enable the kernel debug message log.
- * echo 1 > /sys/module/zfs/parameters/zfs_dbgmsg_enable
+ * # Set the kernel debug log size to N bytes, set to 0 to disable.
+ * echo <bytes> >/sys/module/zfs/parameters/zfs_dbgmsg_maxsize
  *
- * # Clear the kernel debug message log.
+ * # Print the kernel debug log.
+ * cat /proc/spl/kstat/zfs/dbgmsg
+ *
+ * # Clear the kernel debug log.
  * echo 0 >/proc/spl/kstat/zfs/dbgmsg
  */
-#if defined(_KERNEL) && !defined(ZFS_DEBUG)
-int zfs_dbgmsg_enable = 0;
+
+/*
+ * Maximum debug log size, once the limit is reached older entries are
+ * removed from the list in a FIFO fashion.
+ */
+unsigned int zfs_dbgmsg_maxsize = 1048576; /* 1M default */
+
+/*
+ * A configuration string which controls which dprintf messages are logged.
+ * Valid values are: time, pid, cpu, ffl, func, on, all.
+ */
+static char *zfs_dprintf_string = "time,pid,cpu,ffl";
+static int dprintf_filter;
+
+/*
+ */
+#ifdef ZFS_DEBUG
+int zfs_flags = (ZFS_DEBUG_MASK & ~(ZFS_DEBUG_DPRINTF | ZFS_DEBUG_SET_ERROR));
 #else
-int zfs_dbgmsg_enable = 1;
+int zfs_flags = 0;
 #endif
+
 
 static int
 zfs_dbgmsg_headers(char *buf, size_t size)
 {
-	(void) snprintf(buf, size, "%-12s %-8s\n", "timestamp", "message");
+	(void) snprintf(buf, size, "%s %s %s %s %s\n",
+	    "time", "pid:tid", "cpu", "file:line:func", "message");
 
 	return (0);
 }
@@ -61,8 +82,13 @@ zfs_dbgmsg_data(char *buf, size_t size, void *data)
 {
 	zfs_dbgmsg_t *zdm = (zfs_dbgmsg_t *)data;
 
-	(void) snprintf(buf, size, "%-12llu %-s\n",
-	    (u_longlong_t)zdm->zdm_timestamp, zdm->zdm_msg);
+	(void) snprintf(buf, size, "%llu.%09llu %u:%u %u %s %s\n",
+	    (u_longlong_t)zdm->zdm_timestamp / NANOSEC,
+	    (u_longlong_t)zdm->zdm_timestamp % NANOSEC,
+	    zdm->zdm_pid, zdm->zdm_tid,
+	    zdm->zdm_cpu,
+	    zdm->zdm_ffl ? zdm->zdm_ffl : "-",
+	    zdm->zdm_msg ? zdm->zdm_msg : "-");
 
 	return (0);
 }
@@ -82,23 +108,92 @@ zfs_dbgmsg_addr(kstat_t *ksp, loff_t n)
 	return (ksp->ks_private);
 }
 
-static void
-zfs_dbgmsg_purge(int max_size)
+static zfs_dbgmsg_t *
+zfs_dbgmsg_alloc(const char *file, const char *func, int line,
+    const char *fmt, va_list adx)
 {
 	zfs_dbgmsg_t *zdm;
-	int size;
 
-	ASSERT(MUTEX_HELD(&zfs_dbgmsgs_lock));
+	zdm = kmem_zalloc(sizeof (zfs_dbgmsg_t), KM_SLEEP);
+	zdm->zdm_size = sizeof (zfs_dbgmsg_t);
+
+	/*
+	 * When file, function, and line are all provided include them in
+	 * the debug message encoded as a "file:function:line" string.
+	 * For brevity the leading prefix to the filename is stripped.
+	 */
+	if (file != NULL && func != NULL && line) {
+		const char *newfile;
+
+		newfile	= strrchr(file, '/');
+		newfile = (newfile != NULL) ? newfile + 1 : file;
+
+		zdm->zdm_ffl = kmem_asprintf("%s:%d:%s()", newfile, line, func);
+		zdm->zdm_size += strlen(zdm->zdm_ffl);
+	}
+
+	/*
+	 * Generate the message with the trailing newline stripped.
+	 */
+	zdm->zdm_msg = kmem_vasprintf(fmt, adx);
+	zdm->zdm_size += strlen(zdm->zdm_msg);
+
+	char *nl = strrchr(zdm->zdm_msg, '\n');
+	if (nl != NULL)
+		*nl = '\0';
+
+	/*
+	 * Add information describing the context of the caller.
+	 */
+	zdm->zdm_timestamp = gethrtime();
+	zdm->zdm_pid = getpid();
+	zdm->zdm_tid = (uintptr_t)curthread;
+	zdm->zdm_cpu = getcpuid();
+
+	return (zdm);
+}
+
+static void
+zfs_dbgmsg_free(zfs_dbgmsg_t *zdm)
+{
+
+	if (zdm->zdm_ffl != NULL)
+		strfree(zdm->zdm_ffl);
+
+	if (zdm->zdm_msg != NULL)
+		strfree(zdm->zdm_msg);
+
+	kmem_free(zdm, sizeof (zfs_dbgmsg_t));
+}
+
+static void
+zfs_dbgmsg_purge(unsigned int max_size)
+{
+	zfs_dbgmsg_t *zdm;
+
+	mutex_enter(&zfs_dbgmsgs_lock);
 
 	while (zfs_dbgmsg_size > max_size) {
 		zdm = list_remove_head(&zfs_dbgmsgs);
 		if (zdm == NULL)
-			return;
+			break;
 
-		size = zdm->zdm_size;
-		kmem_free(zdm, size);
-		zfs_dbgmsg_size -= size;
+		zfs_dbgmsg_size -= zdm->zdm_size;
+		zfs_dbgmsg_free(zdm);
 	}
+
+	mutex_exit(&zfs_dbgmsgs_lock);
+}
+
+static void
+zfs_dbgmsg_insert(zfs_dbgmsg_t *zdm)
+{
+	mutex_enter(&zfs_dbgmsgs_lock);
+
+	zfs_dbgmsg_size += zdm->zdm_size;
+	list_insert_tail(&zfs_dbgmsgs, zdm);
+
+	mutex_exit(&zfs_dbgmsgs_lock);
 }
 
 static int
@@ -109,6 +204,168 @@ zfs_dbgmsg_update(kstat_t *ksp, int rw)
 
 	return (0);
 }
+
+int
+dprintf_find_string(const char *string)
+{
+	char *tmp_str = zfs_dprintf_string;
+	int len = strlen(string);
+
+	/*
+	 * Find out if this is a string we want to print.
+	 * String format: file1.c,function_name1,file2.c,file3.c
+	 */
+	while (tmp_str != NULL) {
+		if (strncmp(tmp_str, string, len) == 0 &&
+		    (tmp_str[len] == ',' || tmp_str[len] == '\0'))
+			return (1);
+		tmp_str = strchr(tmp_str, ',');
+		if (tmp_str != NULL)
+			tmp_str++; /* Get rid of , */
+	}
+
+	return (0);
+}
+
+static void
+dprintf_set_filter(void)
+{
+	dprintf_filter = 0;
+
+	if (dprintf_find_string("time"))
+		dprintf_filter |= DPRINTF_TIME;
+
+	if (dprintf_find_string("pid"))
+		dprintf_filter |= DPRINTF_PID;
+
+	if (dprintf_find_string("cpu"))
+		dprintf_filter |= DPRINTF_CPU;
+
+	if (dprintf_find_string("ffl") || dprintf_find_string("func"))
+		dprintf_filter |= DPRINTF_FFL;
+
+	if (dprintf_find_string("on") || dprintf_find_string("all"))
+		dprintf_filter |= DPRINTF_MASK;
+}
+
+#ifdef _KERNEL
+/*
+ * Print one message as a trace point, they may be enabled as shown.
+ *
+ * # Enable zfs__dprintf tracepoint, clear the tracepoint ring buffer
+ * $ echo 1 > /sys/module/zfs/parameters/zfs_flags
+ * $ echo 1 > /sys/kernel/debug/tracing/events/zfs/enable
+ * $ echo 0 > /sys/kernel/debug/tracing/trace
+ *
+ * # Dump the ring buffer.
+ * $ cat /sys/kernel/debug/tracing/trace
+ */
+static void
+zfs_dbgmsg_print_one(zfs_dbgmsg_t *zdm)
+{
+	DTRACE_PROBE1(zfs__dprintf, char *, zdm->zdm_buf);
+}
+
+#else
+
+static void
+zfs_dbgmsg_print_headers(const char *tag)
+{
+	flockfile(stdout);
+
+	if (dprintf_filter & DPRINTF_TIME)
+		(void) printf("%s ", "time");
+	if (dprintf_filter & DPRINTF_PID)
+		(void) printf("%s ", "pid:tid");
+	if (dprintf_filter & DPRINTF_CPU)
+		(void) printf("%s ", "cpu");
+	if (dprintf_filter & DPRINTF_FFL)
+		(void) printf("%s ", "file:line:func");
+
+	(void) printf("%s (%s)\n", "message", "tag");
+
+	funlockfile(stdout);
+}
+
+/*
+ * Print these messages to the terminal by setting the ZFS_DEBUG environment
+ * variable or include the "debug=..." argument on the command line.
+ */
+static void
+zfs_dbgmsg_print_one(zfs_dbgmsg_t *zdm)
+{
+	flockfile(stdout);
+
+	if (dprintf_filter & DPRINTF_TIME)
+		(void) printf("%llu.%09llu ",
+		    (u_longlong_t)zdm->zdm_timestamp / NANOSEC,
+		    (u_longlong_t)zdm->zdm_timestamp % NANOSEC);
+	if (dprintf_filter & DPRINTF_PID)
+		(void) printf("%u:%u ", zdm->zdm_pid, zdm->zdm_tid);
+	if (dprintf_filter & DPRINTF_CPU)
+		(void) printf("%u ", zdm->zdm_cpu);
+	if (dprintf_filter & DPRINTF_FFL)
+		(void) printf("%s ", zdm->zdm_ffl);
+
+	(void) printf("%s\n", zdm->zdm_msg);
+
+	funlockfile(stdout);
+}
+
+void
+zfs_dbgmsg_print(const char *tag)
+{
+	zfs_dbgmsg_t *zdm;
+
+	zfs_dbgmsg_print_headers(tag);
+
+	mutex_enter(&zfs_dbgmsgs_lock);
+
+	for (zdm = list_head(&zfs_dbgmsgs); zdm;
+	    zdm = list_next(&zfs_dbgmsgs, zdm))
+		zfs_dbgmsg_print_one(zdm);
+
+	mutex_exit(&zfs_dbgmsgs_lock);
+}
+
+void
+dprintf_setup(int *argc, char **argv)
+{
+	char *dprintf_string = NULL;
+
+	/*
+	 * Debugging can be specified two ways: by setting the
+	 * environment variable ZFS_DEBUG, or by including a
+	 * "debug=..."  argument on the command line.  The command
+	 * line setting overrides the environment variable.
+	 */
+	for (int i = 1; i < *argc; i++) {
+		int j, len = strlen("debug=");
+		/* First look for a command line argument */
+		if (strncmp("debug=", argv[i], len) == 0) {
+			dprintf_string = argv[i] + len;
+			/* Remove from args */
+			for (j = i; j < *argc; j++)
+				argv[j] = argv[j+1];
+			argv[j] = NULL;
+			(*argc)--;
+		}
+	}
+
+	/* Look for ZFS_DEBUG environment variable */
+	if (dprintf_string == NULL)
+		dprintf_string = getenv("ZFS_DEBUG");
+
+	/* Enable dprintf and set filter if requested. */
+	if (dprintf_string != NULL) {
+		zfs_dprintf_string = dprintf_string;
+		dprintf_set_filter();
+		zfs_flags |= ZFS_DEBUG_DPRINTF;
+	} else {
+		zfs_dprintf_string = NULL;
+	}
+}
+#endif /* !_KERNEL */
 
 void
 zfs_dbgmsg_init(void)
@@ -128,6 +385,8 @@ zfs_dbgmsg_init(void)
 		    zfs_dbgmsg_data, zfs_dbgmsg_addr);
 		kstat_install(zfs_dbgmsg_kstat);
 	}
+
+	dprintf_set_filter();
 }
 
 void
@@ -136,29 +395,10 @@ zfs_dbgmsg_fini(void)
 	if (zfs_dbgmsg_kstat)
 		kstat_delete(zfs_dbgmsg_kstat);
 
-	mutex_enter(&zfs_dbgmsgs_lock);
 	zfs_dbgmsg_purge(0);
-	mutex_exit(&zfs_dbgmsgs_lock);
 	mutex_destroy(&zfs_dbgmsgs_lock);
-}
 
-void
-__zfs_dbgmsg(char *buf)
-{
-	zfs_dbgmsg_t *zdm;
-	int size;
-
-	size = sizeof (zfs_dbgmsg_t) + strlen(buf);
-	zdm = kmem_zalloc(size, KM_SLEEP);
-	zdm->zdm_size = size;
-	zdm->zdm_timestamp = gethrestime_sec();
-	strcpy(zdm->zdm_msg, buf);
-
-	mutex_enter(&zfs_dbgmsgs_lock);
-	list_insert_tail(&zfs_dbgmsgs, zdm);
-	zfs_dbgmsg_size += size;
-	zfs_dbgmsg_purge(MAX(zfs_dbgmsg_maxsize, 0));
-	mutex_exit(&zfs_dbgmsgs_lock);
+	ASSERT0(zfs_dbgmsg_size);
 }
 
 void
@@ -168,99 +408,87 @@ __set_error(const char *file, const char *func, int line, int err)
 		__dprintf(file, func, line, "error %lu", err);
 }
 
-#ifdef _KERNEL
 void
 __dprintf(const char *file, const char *func, int line, const char *fmt, ...)
 {
-	const char *newfile;
+	zfs_dbgmsg_t *zdm;
 	va_list adx;
-	size_t size;
-	char *buf;
-	char *nl;
-	int i;
 
-	if (!zfs_dbgmsg_enable &&
-	    !(zfs_flags & (ZFS_DEBUG_DPRINTF | ZFS_DEBUG_SET_ERROR)))
-		return;
+	va_start(adx, fmt);
+	zdm = zfs_dbgmsg_alloc(file, func, line, fmt, adx);
+	va_end(adx);
 
-	size = 1024;
-	buf = kmem_alloc(size, KM_SLEEP);
+	zfs_dbgmsg_print_one(zdm);
 
-	/*
-	 * Get rid of annoying prefix to filename.
-	 */
-	newfile = strrchr(file, '/');
-	if (newfile != NULL) {
-		newfile = newfile + 1; /* Get rid of leading / */
+	if (zfs_dbgmsg_maxsize) {
+		zfs_dbgmsg_insert(zdm);
+		zfs_dbgmsg_purge(zfs_dbgmsg_maxsize);
 	} else {
-		newfile = file;
+		zfs_dbgmsg_free(zdm);
 	}
-
-	i = snprintf(buf, size, "%s:%d:%s(): ", newfile, line, func);
-
-	if (i < size) {
-		va_start(adx, fmt);
-		(void) vsnprintf(buf + i, size - i, fmt, adx);
-		va_end(adx);
-	}
-
-	/*
-	 * Get rid of trailing newline.
-	 */
-	nl = strrchr(buf, '\n');
-	if (nl != NULL)
-		*nl = '\0';
-
-	/*
-	 * To get this data enable the zfs__dprintf trace point as shown:
-	 *
-	 * # Enable zfs__dprintf tracepoint, clear the tracepoint ring buffer
-	 * $ echo 1 > /sys/module/zfs/parameters/zfs_flags
-	 * $ echo 1 > /sys/kernel/debug/tracing/events/zfs/enable
-	 * $ echo 0 > /sys/kernel/debug/tracing/trace
-	 *
-	 * # Dump the ring buffer.
-	 * $ cat /sys/kernel/debug/tracing/trace
-	 */
-	if (zfs_flags & (ZFS_DEBUG_DPRINTF | ZFS_DEBUG_SET_ERROR))
-		DTRACE_PROBE1(zfs__dprintf, char *, buf);
-
-	/*
-	 * To get this data enable the zfs debug log as shown:
-	 *
-	 * # Set zfs_dbgmsg enable, clear the log buffer
-	 * $ echo 1 > /sys/module/zfs/parameters/zfs_dbgmsg_enable
-	 * $ echo 0 > /proc/spl/kstat/zfs/dbgmsg
-	 *
-	 * # Dump the log buffer.
-	 * $ cat /proc/spl/kstat/zfs/dbgmsg
-	 */
-	if (zfs_dbgmsg_enable)
-		__zfs_dbgmsg(buf);
-
-	kmem_free(buf, size);
 }
-
-#else
 
 void
-zfs_dbgmsg_print(const char *tag)
+zfs_dbgmsg(const char *fmt, ...)
 {
 	zfs_dbgmsg_t *zdm;
+	va_list adx;
 
-	(void) printf("ZFS_DBGMSG(%s):\n", tag);
-	mutex_enter(&zfs_dbgmsgs_lock);
-	for (zdm = list_head(&zfs_dbgmsgs); zdm;
-	    zdm = list_next(&zfs_dbgmsgs, zdm))
-		(void) printf("%s\n", zdm->zdm_msg);
-	mutex_exit(&zfs_dbgmsgs_lock);
+	if (!zfs_dbgmsg_maxsize)
+		return;
+
+	va_start(adx, fmt);
+	zdm = zfs_dbgmsg_alloc(NULL, NULL, 0, fmt, adx);
+	va_end(adx);
+
+	DTRACE_PROBE1(zfs__dbgmsg, char *, zdm->zdm_msg);
+
+	zfs_dbgmsg_insert(zdm);
+	zfs_dbgmsg_purge(zfs_dbgmsg_maxsize);
 }
-#endif /* _KERNEL */
 
 #ifdef _KERNEL
-module_param(zfs_dbgmsg_enable, int, 0644);
-MODULE_PARM_DESC(zfs_dbgmsg_enable, "Enable ZFS debug message log");
 
-module_param(zfs_dbgmsg_maxsize, int, 0644);
+#include <linux/mod_compat.h>
+
+static int
+param_set_dbgmsg_maxsize(const char *val, zfs_kernel_param_t *kp)
+{
+	int error;
+
+	error = param_set_uint(val, kp);
+	if (error == 0)
+		zfs_dbgmsg_purge(zfs_dbgmsg_maxsize);
+
+	return (error);
+}
+
+static int
+param_set_dprintf_string(const char *val, zfs_kernel_param_t *kp)
+{
+	int error;
+	char *p;
+
+	if (val == NULL)
+		return (SET_ERROR(-EINVAL));
+
+	if ((p = strchr(val, '\n')) != NULL)
+		*p = '\0';
+
+	error = param_set_charp(val, kp);
+	if (error == 0) {
+		dprintf_set_filter();
+		zfs_flags |= ZFS_DEBUG_DPRINTF;
+	}
+
+	return (error);
+}
+
+module_param_call(zfs_dbgmsg_maxsize, param_set_dbgmsg_maxsize,
+    param_get_uint, &zfs_dbgmsg_maxsize, 0644);
 MODULE_PARM_DESC(zfs_dbgmsg_maxsize, "Maximum ZFS debug log size");
+
+module_param_call(zfs_dprintf_string, param_set_dprintf_string,
+    param_get_charp, &zfs_dprintf_string, 0644);
+MODULE_PARM_DESC(zfs_dprintf_string, "Filter rules for dprintf log messages");
 #endif

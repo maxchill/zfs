@@ -242,13 +242,6 @@ static avl_tree_t spa_l2cache_avl;
 kmem_cache_t *spa_buffer_pool;
 int spa_mode_global;
 
-#ifdef ZFS_DEBUG
-/* Everything except dprintf and spa is on by default in debug builds */
-int zfs_flags = ~(ZFS_DEBUG_DPRINTF | ZFS_DEBUG_SPA);
-#else
-int zfs_flags = 0;
-#endif
-
 /*
  * zfs_recover can be set to nonzero to attempt to recover from
  * otherwise-fatal errors, typically caused by on-disk corruption.  When
@@ -1902,7 +1895,7 @@ spa_init(int mode)
 	spa_mode_global = mode;
 
 #ifndef _KERNEL
-	if (spa_mode_global != FREAD && dprintf_find_string("watch")) {
+	if (spa_mode_global != FREAD && zfs_flags & ZFS_DEBUG_ARC_WATCH) {
 		struct sigaction sa;
 
 		sa.sa_flags = SA_SIGINFO;
