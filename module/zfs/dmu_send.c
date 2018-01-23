@@ -2453,10 +2453,8 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
 	}
 
 	err = dmu_object_info(rwa->os, drro->drr_object, &doi);
-
-	if (err != 0 && err != ENOENT)
+	if (err != 0 && err != ENOENT && err != EEXIST)
 		return (SET_ERROR(EINVAL));
-	object = err == 0 ? drro->drr_object : DMU_NEW_OBJECT;
 
 	if (drro->drr_object > rwa->max_object)
 		rwa->max_object = drro->drr_object;
@@ -2474,20 +2472,97 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
 		int nblkptr = deduce_nblkptr(drro->drr_bonustype,
 		    drro->drr_bonuslen);
 
+		object = drro->drr_object;
+
 		/* nblkptr will be bounded by the bonus size and type */
 		if (rwa->raw && nblkptr != drro->drr_nblkptr)
 			return (SET_ERROR(EINVAL));
 
-		if (drro->drr_blksz != doi.doi_data_block_size ||
+		if (rwa->raw &&
+		    (drro->drr_blksz != doi.doi_data_block_size ||
 		    nblkptr < doi.doi_nblkptr ||
-		    (rwa->raw &&
-		    (indblksz != doi.doi_metadata_block_size ||
-		    drro->drr_nlevels < doi.doi_indirection))) {
+		    indblksz != doi.doi_metadata_block_size ||
+		    drro->drr_nlevels < doi.doi_indirection ||
+		    drro->drr_dn_slots != doi.doi_dnodesize >> DNODE_SHIFT)) {
+			err = dmu_free_long_range_raw(rwa->os,
+			    drro->drr_object, 0, DMU_OBJECT_END);
+			if (err != 0)
+				return (SET_ERROR(EINVAL));
+		} else if (drro->drr_blksz != doi.doi_data_block_size ||
+		    nblkptr < doi.doi_nblkptr ||
+		    drro->drr_dn_slots != doi.doi_dnodesize >> DNODE_SHIFT) {
 			err = dmu_free_long_range(rwa->os, drro->drr_object,
 			    0, DMU_OBJECT_END);
 			if (err != 0)
 				return (SET_ERROR(EINVAL));
 		}
+
+		/*
+		 * The dmu does not currently support decreasing nlevels
+		 * on an object. For non-raw sends, this does not matter
+		 * and the new object can just use the previous one's nlevels.
+		 * For raw sends, however, the structure of the received dnode
+		 * (including nlevels) must match that of the send side.
+		 * Therefore, instead of using dmu_object_reclaim(), we must
+		 * free the object completely and call dmu_object_claim_dnsize()
+		 * instead.
+		 */
+		if ((rwa->raw && drro->drr_nlevels < doi.doi_indirection) ||
+		    drro->drr_dn_slots != doi.doi_dnodesize >> DNODE_SHIFT) {
+			err = dmu_free_long_object_raw(rwa->os,
+			    drro->drr_object);
+			if (err != 0)
+				return (SET_ERROR(EINVAL));
+
+			txg_wait_synced(dmu_objset_pool(rwa->os), 0);
+			object = DMU_NEW_OBJECT;
+		}
+	} else if (err == EEXIST) {
+		/*
+		 * The object requested is currently an interior slot of a
+		 * multi-slot dnode. This will be resolved when the next txg
+		 * is synced out, since the send stream will have told us
+		 * to free this slot when we freed the associated dnode
+		 * earlier in the stream.
+		 */
+		txg_wait_synced(dmu_objset_pool(rwa->os), 0);
+		object = drro->drr_object;
+	} else {
+		/* object is free and we are about to allocate a new one */
+		object = DMU_NEW_OBJECT;
+	}
+
+	/*
+	 * The object being received is considered authoritative.  Therefore
+	 * we can infer that any existing dnode which the new multi-slot
+	 * dnode overlaps has a matching free record and should be removed.
+	 */
+	if (drro->drr_dn_slots > 1) {
+		uint64_t slot = drro->drr_object + 1;
+
+		while (slot < drro->drr_object + drro->drr_dn_slots) {
+			dmu_object_info_t slot_doi;
+
+			err = dmu_object_info(rwa->os, slot, &slot_doi);
+			if (err == ENOENT || err == EEXIST) {
+				slot++;
+				continue;
+			} else if (err != 0) {
+				return (err);
+			}
+
+			if (rwa->raw)
+				err = dmu_free_long_object_raw(rwa->os, slot);
+			else
+				err = dmu_free_long_object(rwa->os, slot);
+
+			if (err != 0)
+				return (err);
+
+			slot++;
+		}
+
+		txg_wait_synced(dmu_objset_pool(rwa->os), 0);
 	}
 
 	tx = dmu_tx_create(rwa->os);
@@ -3186,7 +3261,7 @@ receive_read_record(struct receive_arg *ra)
 		 * See receive_read_prefetch for an explanation why we're
 		 * storing this object in the ignore_obj_list.
 		 */
-		if (err == ENOENT ||
+		if (err == ENOENT || err == EEXIST ||
 		    (err == 0 && doi.doi_data_block_size != drro->drr_blksz)) {
 			objlist_insert(&ra->ignore_objlist, drro->drr_object);
 			err = 0;
