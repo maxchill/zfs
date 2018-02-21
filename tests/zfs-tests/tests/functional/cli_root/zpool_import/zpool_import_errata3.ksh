@@ -19,6 +19,7 @@
 #
 
 . $STF_SUITE/include/libtest.shlib
+. $STF_SUITE/tests/functional/zvol/zvol_misc/zvol_misc_common.kshlib
 
 #
 # DESCRIPTION:
@@ -47,33 +48,38 @@ function uncompress_pool
 	log_must bzcat \
 	    $STF_SUITE/tests/functional/cli_root/zpool_import/$POOL_FILE.bz2 \
 	    > /$TESTPOOL/$POOL_FILE
-	return 0
 }
 
 function cleanup
 {
-	poolexists $POOL_NAME && log_must zpool destroy $POOL_NAME
-	[[ -e /$TESTPOOL/$POOL_FILE ]] && rm /$TESTPOOL/$POOL_FILE
-	return 0
+	poolexists $POOL_NAME && destroy_pool $POOL_NAME
+	log_must rm -f /$TESTPOOL/$POOL_FILE
+#	block_device_wait
+#	udev_cleanup
 }
 log_onexit cleanup
 
 log_assert "Verify that Errata 3 is properly handled"
 
+# 1. Import a pre-packaged pool with Errata #3
 uncompress_pool
 log_must zpool import -d /$TESTPOOL/ $POOL_NAME
 log_must eval "zpool status | grep -q Errata"
 log_must eval "echo 'password' | zfs load-key $POOL_NAME/testfs"
 log_must eval "echo 'password' | zfs load-key $POOL_NAME/testvol"
 
+# 2. Attempt to write to the effected datasets
+# 3. Attempt to read from the effected datasets
 log_mustnot zfs mount $POOL_NAME/testfs
 log_must zfs mount -o ro $POOL_NAME/testfs
 
 old_mntpnt=$(get_prop mountpoint $POOL_NAME/testfs)
 log_must eval "ls $old_mntpnt | grep -q testfile"
-block_device_wait
-log_mustnot dd if=/dev/zero of=/dev/zvol/$POOL_NAME/testvol bs=512 count=1
-log_must dd if=/dev/zvol/$POOL_NAME/testvol of=/dev/null bs=512 count=1
+#blockdev_exists $ZVOL_DEVDIR/$POOL_NAME/testvol
+#log_mustnot dd if=/dev/zero of=$ZVOL_DEVDIR/$POOL_NAME/testvol bs=512 count=1
+#log_must dd if=$ZVOL_DEVDIR/$POOL_NAME/testvol of=/dev/null bs=512 count=1
+
+# 4. Attempt to perform a raw send of the effected datasets
 log_must eval "echo 'password' | zfs create \
 	-o encryption=on -o keyformat=passphrase -o keylocation=prompt \
 	cryptv0/encroot"
@@ -82,18 +88,27 @@ log_mustnot eval "zfs send -w $POOL_NAME/testfs@snap1 | \
 log_mustnot eval "zfs send -w $POOL_NAME/testvol@snap1 | \
 	zfs recv $POOL_NAME/encroot/testvol"
 
+# 5. Perform a regular send of the datasets under a new encryption root
 log_must eval "zfs send $POOL_NAME/testfs@snap1 | \
 	zfs recv $POOL_NAME/encroot/testfs"
 log_must eval "zfs send $POOL_NAME/testvol@snap1 | \
 	zfs recv $POOL_NAME/encroot/testvol"
-block_device_wait
-log_must dd if=/dev/zero of=/dev/zvol/$POOL_NAME/encroot/testvol bs=512 count=1
+
+# 6. Verify the new datasets can be read from and written to
+#blockdev_exists $ZVOL_DEVDIR/$POOL_NAME/encroot/testvol
+#log_must dd if=/dev/zero of=$ZVOL_DEVDIR/$POOL_NAME/encroot/testvol \
+#    bs=512 count=1
 new_mntpnt=$(get_prop mountpoint $POOL_NAME/encroot/testfs)
 log_must eval "ls $new_mntpnt | grep -q testfile"
+
+# 7. Destroy the old effected datasets
 log_must zfs destroy -r $POOL_NAME/testfs
 log_must zfs destroy -r $POOL_NAME/testvol
+#blockdev_missing $ZVOL_DEVDIR/$POOL_NAME/testvol
 
+# 8. Reimport the pool and verify that the errata is no longer present
 log_must zpool export $POOL_NAME
 log_must zpool import -d /$TESTPOOL/ $POOL_NAME
 log_mustnot eval "zpool status | grep -q Errata"
+
 log_pass "Errata 3 is properly handled"
