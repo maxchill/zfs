@@ -158,6 +158,7 @@ AC_CONFIG_FILES([
 	tests/zfs-tests/cmd/user_ns_exec/Makefile
 	tests/zfs-tests/cmd/devname2devid/Makefile
 	tests/zfs-tests/cmd/dir_rd_update/Makefile
+	tests/zfs-tests/cmd/fiemap/Makefile
 	tests/zfs-tests/cmd/file_check/Makefile
 	tests/zfs-tests/cmd/file_trunc/Makefile
 	tests/zfs-tests/cmd/file_write/Makefile
@@ -266,6 +267,7 @@ AC_CONFIG_FILES([
 	tests/zfs-tests/tests/functional/features/async_destroy/Makefile
 	tests/zfs-tests/tests/functional/features/large_dnode/Makefile
 	tests/zfs-tests/tests/functional/features/Makefile
+	tests/zfs-tests/tests/functional/fiemap/Makefile
 	tests/zfs-tests/tests/functional/grow_pool/Makefile
 	tests/zfs-tests/tests/functional/grow_replicas/Makefile
 	tests/zfs-tests/tests/functional/history/Makefile
