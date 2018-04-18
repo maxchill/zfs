@@ -30,8 +30,10 @@
 #include <sys/uio.h>
 #include <sys/cred.h>
 #include <sys/fcntl.h>
+#include <sys/fiemap.h>
 #include <sys/pathname.h>
 #include <sys/zpl.h>
+#include <sys/dmu_traverse.h> /* For blkptr_cb_t */
 
 #ifdef	__cplusplus
 extern "C" {
@@ -69,6 +71,7 @@ extern int zfs_link(struct inode *tdip, struct inode *sip,
 extern void zfs_inactive(struct inode *ip);
 extern int zfs_space(struct inode *ip, int cmd, flock64_t *bfp, int flag,
     offset_t offset, cred_t *cr);
+extern int zfs_fiemap(struct inode *ip, blkptr_cb_t func, void *arg);
 extern int zfs_fid(struct inode *ip, fid_t *fidp);
 extern int zfs_getsecattr(struct inode *ip, vsecattr_t *vsecp, int flag,
     cred_t *cr);

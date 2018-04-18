@@ -1254,6 +1254,23 @@ typedef enum {
 #define	ZCP_MAX_MEMLIMIT	(10 * ZCP_DEFAULT_MEMLIMIT)
 
 /*
+ * FIEMAP interface flags
+ *
+ * XXX - The following flags have been submitted for inclusion in future
+ * Linux kernels and the filefrag(8) utility.
+ */
+#define	fe_device		fe_reserved[0]
+#define	fe_phys_len		fe_reserved64[0]
+
+#ifndef FIEMAP_FLAG_COPIES
+#define	FIEMAP_FLAG_COPIES	0x08000000	/* request all copies */
+#endif
+
+#ifndef FIEMAP_FLAG_NOMERGE
+#define	FIEMAP_FLAG_NOMERGE	0x04000000	/* never merge blocks */
+#endif
+
+/*
  * Sysevent payload members.  ZFS will generate the following sysevents with the
  * given payloads:
  *
