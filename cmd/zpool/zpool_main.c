@@ -1752,6 +1752,7 @@ typedef struct status_cbdata {
 	boolean_t	cb_first;
 	boolean_t	cb_dedup_stats;
 	boolean_t	cb_print_status;
+	boolean_t	cb_initialize;
 	vdev_cmd_data_list_t	*vcdl;
 } status_cbdata_t;
 
@@ -1973,7 +1974,7 @@ print_status_config(zpool_handle_t *zhp, status_cbdata_t *cb, const char *name,
 	if ((vs->vs_initialize_state == VDEV_INITIALIZE_ACTIVE ||
 	    vs->vs_initialize_state == VDEV_INITIALIZE_SUSPENDED ||
 	    vs->vs_initialize_state == VDEV_INITIALIZE_COMPLETE) &&
-	    !vs->vs_scan_removing) {
+	    !vs->vs_scan_removing && cb->cb_initialize == B_TRUE) {
 		char zbuf[1024];
 		char tbuf[256];
 		struct tm zaction_ts;
@@ -7183,6 +7184,7 @@ status_callback(zpool_handle_t *zhp, void *data)
  *
  *	-c CMD	For each vdev, run command CMD
  *	-g	Display guid for individual vdev name.
+ *	-i	Display vdev initialization status.
  *	-L	Follow links when resolving vdev path name.
  *	-P	Display full path for vdev name.
  *	-v	Display complete error logs
@@ -7203,7 +7205,7 @@ zpool_do_status(int argc, char **argv)
 	char *cmd = NULL;
 
 	/* check options */
-	while ((c = getopt(argc, argv, "c:gLPvxDT:")) != -1) {
+	while ((c = getopt(argc, argv, "c:giLPvxDT:")) != -1) {
 		switch (c) {
 		case 'c':
 			if (cmd != NULL) {
@@ -7231,6 +7233,9 @@ zpool_do_status(int argc, char **argv)
 			break;
 		case 'g':
 			cb.cb_name_flags |= VDEV_NAME_GUID;
+			break;
+		case 'i':
+			cb.cb_initialize = B_TRUE;
 			break;
 		case 'L':
 			cb.cb_name_flags |= VDEV_NAME_FOLLOW_LINKS;
