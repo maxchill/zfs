@@ -26,6 +26,7 @@ KERNEL_C = \
 	zfeature_common.c \
 	zfs_comutil.c \
 	zfs_deleg.c \
+	zfs_draid.c \
 	zfs_fletcher.c \
 	zfs_fletcher_aarch64_neon.c \
 	zfs_fletcher_avx512.c \
@@ -111,6 +112,7 @@ KERNEL_C = \
 	unique.c \
 	vdev.c \
 	vdev_cache.c \
+	vdev_draid.c \
 	vdev_file.c \
 	vdev_indirect_births.c \
 	vdev_indirect.c \
@@ -133,6 +135,7 @@ KERNEL_C = \
 	vdev_raidz_math_powerpc_altivec.c \
 	vdev_removal.c \
 	vdev_root.c \
+	vdev_scan.c \
 	vdev_trim.c \
 	zap.c \
 	zap_leaf.c \
