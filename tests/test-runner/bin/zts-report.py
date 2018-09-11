@@ -196,7 +196,6 @@ maybe = {
         ['FAIL', rewind_reason],
     'cli_root/zpool_import/import_rewind_config_changed':
         ['FAIL', rewind_reason],
-    'cli_root/zpool_import/zpool_import_missing_003_pos': ['SKIP', '6839'],
     'cli_root/zpool_trim/setup': ['SKIP', trim_reason],
     'cli_root/zpool_upgrade/zpool_upgrade_004_pos': ['FAIL', '6141'],
     'cli_user/misc/arc_summary3_001_pos': ['SKIP', python_reason],

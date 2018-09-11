@@ -4,6 +4,7 @@ COMMON_H = \
 	$(top_srcdir)/include/zfeature_common.h \
 	$(top_srcdir)/include/zfs_comutil.h \
 	$(top_srcdir)/include/zfs_deleg.h \
+	$(top_srcdir)/include/zfs_draid.h \
 	$(top_srcdir)/include/zfs_fletcher.h \
 	$(top_srcdir)/include/zfs_namecheck.h \
 	$(top_srcdir)/include/zfs_prop.h
