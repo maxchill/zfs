@@ -272,6 +272,9 @@ typedef struct indirect_split {
 typedef struct indirect_vsd {
 	boolean_t iv_split_block;
 	boolean_t iv_reconstruct;
+	uint64_t iv_unique_combinations;
+	uint64_t iv_attempts;
+	uint64_t iv_attempts_max;
 
 	list_t iv_splits; /* list of indirect_split_t's */
 } indirect_vsd_t;
@@ -1457,6 +1460,106 @@ vdev_indirect_all_checksum_errors(zio_t *zio)
 }
 
 /*
+ * Copy data from all the splits to a main zio then validate the checksum.
+ * If then checksum is successfully validated issue repair I/Os to any
+ * copies of splits which don't match to validated version.
+ */
+static int
+vdev_indirect_splits_checksum_validate(indirect_vsd_t *iv, zio_t *zio)
+{
+	zio_bad_cksum_t zbc;
+
+	for (indirect_split_t *is = list_head(&iv->iv_splits);
+	    is != NULL; is = list_next(&iv->iv_splits, is)) {
+
+		ASSERT3P(is->is_good_child->ic_data, !=, NULL);
+		ASSERT3P(is->is_good_child->ic_duplicate, ==, NULL);
+
+		abd_copy_off(zio->io_abd, is->is_good_child->ic_data,
+		    is->is_split_offset, 0, is->is_size);
+	}
+
+	int error = zio_checksum_error(zio, &zbc);
+	if (error == 0) {
+		vdev_indirect_repair(zio);
+		zio_checksum_verified(zio);
+	}
+
+	return (error);
+}
+
+/*
+ * There are relatively few possible combinations, making it feasible to
+ * deterministically check them all.  We do this by setting the good_child
+ * to the next unique split version.  If we reach the end of the list then
+ * "carry over" to the next unique split version (like counting in base
+ * is_unique_children, but each digit can have a different base).
+ */
+static int
+vdev_indirect_splits_enumerate_all(indirect_vsd_t *iv, zio_t *zio)
+{
+	int error = ECKSUM;
+	boolean_t more = B_TRUE;
+
+	while (more == B_TRUE) {
+		iv->iv_attempts++;
+		more = B_FALSE;
+
+		error = vdev_indirect_splits_checksum_validate(iv, zio);
+		if (error == 0)
+			return (0);
+
+		for (indirect_split_t *is = list_head(&iv->iv_splits);
+		    is != NULL; is = list_next(&iv->iv_splits, is)) {
+			if ((is->is_good_child = list_next(
+			    &is->is_unique_child, is->is_good_child)) != NULL) {
+				more = B_TRUE;
+				break;
+			}
+
+			is->is_good_child = list_head(&is->is_unique_child);
+		}
+	}
+
+	ASSERT3S(iv->iv_attempts, <=, iv->iv_unique_combinations);
+
+	return (error);
+}
+
+/*
+ * There are too many combinations to try all of them in a reasonable amount
+ * of time.  So try a fixed number of random combinations from the unique
+ * split versions, after which we'll consider the block unrecoverable.
+ */
+static int
+vdev_indirect_splits_enumerate_randomly(indirect_vsd_t *iv, zio_t *zio)
+{
+	int error = ECKSUM;
+
+	while (iv->iv_attempts < iv->iv_attempts_max) {
+		iv->iv_attempts++;
+
+		error = vdev_indirect_splits_checksum_validate(iv, zio);
+		if (error == 0)
+			return (0);
+
+		for (indirect_split_t *is = list_head(&iv->iv_splits);
+		    is != NULL; is = list_next(&iv->iv_splits, is)) {
+			indirect_child_t *ic = list_head(&is->is_unique_child);
+			int children = is->is_unique_children;
+
+			for (int i = spa_get_random(children); i > 0; i--)
+				ic = list_next(&is->is_unique_child, ic);
+
+			ASSERT3P(ic, !=, NULL);
+			is->is_good_child = ic;
+		}
+	}
+
+	return (error);
+}
+
+/*
  * This function is called when we have read all copies of the data and need
  * to try to find a combination of copies that gives us the right checksum.
  *
@@ -1510,19 +1613,21 @@ static void
 vdev_indirect_reconstruct_io_done(zio_t *zio)
 {
 	indirect_vsd_t *iv = zio->io_vsd;
-	uint64_t attempts = 0;
-	uint64_t attempts_max = UINT64_MAX;
-	uint64_t combinations = 1;
+	int error;
+
+	iv->iv_unique_combinations = 1;
+	iv->iv_attempts_max = UINT64_MAX;
+	iv->iv_attempts = 0;
 
 	if (zfs_reconstruct_indirect_combinations_max > 0)
-		attempts_max = zfs_reconstruct_indirect_combinations_max;
+		iv->iv_attempts_max = zfs_reconstruct_indirect_combinations_max;
 
 	/*
 	 * Determine the unique children for a split segment and add them
 	 * to the is_unique_child list.  By restricting reconstruction
-	 * attempts to these children, only unique combinations will be
-	 * considered.  This can vastly reduce the search space when there
-	 * are a large number of indirect splits.
+	 * to these children, only unique combinations will be considered.
+	 * This can vastly reduce the search space when there are a large
+	 * number of indirect splits.
 	 */
 	for (indirect_split_t *is = list_head(&iv->iv_splits);
 	    is != NULL; is = list_next(&iv->iv_splits, is)) {
@@ -1560,90 +1665,35 @@ vdev_indirect_reconstruct_io_done(zio_t *zio)
 			return;
 		}
 
-		combinations *= is->is_unique_children;
+		iv->iv_unique_combinations *= is->is_unique_children;
 		is->is_good_child = list_head(&is->is_unique_child);
 	}
 
-	for (;;) {
-		/* copy data from splits to main zio */
-		for (indirect_split_t *is = list_head(&iv->iv_splits);
-		    is != NULL; is = list_next(&iv->iv_splits, is)) {
+	ASSERT3S(iv->iv_unique_combinations, >=, 1);
 
-			ASSERT3P(is->is_good_child->ic_data, !=, NULL);
-			ASSERT3P(is->is_good_child->ic_duplicate, ==, NULL);
+	if (iv->iv_unique_combinations <= iv->iv_attempts_max &&
+	    spa_get_random(2) != 0)
+		error = vdev_indirect_splits_enumerate_all(iv, zio);
+	else
+		error = vdev_indirect_splits_enumerate_randomly(iv, zio);
 
-			abd_copy_off(zio->io_abd, is->is_good_child->ic_data,
-			    is->is_split_offset, 0, is->is_size);
-		}
-
-		/* See if this checksum matches. */
-		zio_bad_cksum_t zbc;
-		int ret = zio_checksum_error(zio, &zbc);
-		if (ret == 0) {
-			/* Found a matching checksum.  Issue repair i/os. */
-			vdev_indirect_repair(zio);
-			zio_checksum_verified(zio);
-			return;
-		}
-
-		/*
-		 * Checksum failed; try a different combination of unique
-		 * split children.
-		 */
-		boolean_t more = B_FALSE;
-		attempts++;
-
-		if (combinations <= attempts_max) {
-			/*
-			 * There are relatively few possible combinations, so
-			 * deterministically check them all.  We do this by
-			 * setting the good_child to the next unique split
-			 * version.  If we reach the end of the list then
-			 * "carry over" to the next unique split version
-			 * (like counting in base is_unique_children, but
-			 * each digit can have a different base).
-			 */
-			for (indirect_split_t *is = list_head(&iv->iv_splits);
-			    is != NULL; is = list_next(&iv->iv_splits, is)) {
-				is->is_good_child = list_next(
-				    &is->is_unique_child, is->is_good_child);
-				if (is->is_good_child != NULL) {
-					more = B_TRUE;
-					break;
-				}
-				is->is_good_child = list_head(
-				    &is->is_unique_child);
-			}
-		} else if (attempts <= attempts_max) {
-			/*
-			 * There are too many combinations to try all of them
-			 * in a reasonable amount of time, so try a fixed
-			 * number of random combinations from the unique
-			 * split versions, after which we'll consider the
-			 * block unrecoverable.
-			 */
-			for (indirect_split_t *is = list_head(&iv->iv_splits);
-			    is != NULL; is = list_next(&iv->iv_splits, is)) {
-				int nr_c = is->is_unique_children;
-				indirect_child_t *c =
-				    list_head(&is->is_unique_child);
-
-				for (int i = spa_get_random(nr_c); i > 0; i--)
-					c = list_next(&is->is_unique_child, c);
-
-				ASSERT3P(c, !=, NULL);
-				is->is_good_child = c;
-			}
-			more = B_TRUE;
-		}
-
-		if (!more) {
-			/* All attempted combinations failed. */
-			zio->io_error = ret;
-			vdev_indirect_all_checksum_errors(zio);
-			zio_checksum_verified(zio);
-			return;
-		}
+	if (error != 0) {
+		/* All attempted combinations failed. */
+		zio->io_error = error;
+		vdev_indirect_all_checksum_errors(zio);
+		zio_checksum_verified(zio);
+	} else {
+#if _KERNEL
+		zfs_dbgmsg("matched after %llu / %llu allowed attempts, %llu "
+		    "unique combination(s)\n", (u_longlong_t)iv->iv_attempts,
+		    (u_longlong_t)iv->iv_attempts_max,
+		    (u_longlong_t)iv->iv_unique_combinations);
+#else
+		printf("matched after %llu / %llu allowed attempts, %llu "
+		    "unique combination(s)\n", (u_longlong_t)iv->iv_attempts,
+		    (u_longlong_t)iv->iv_attempts_max,
+		    (u_longlong_t)iv->iv_unique_combinations);
+#endif
 	}
 }
 
