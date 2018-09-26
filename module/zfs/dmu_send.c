@@ -1246,6 +1246,7 @@ send_traverse_thread(void *arg)
 	thread_exit();
 }
 
+#ifdef ZFS_DEBUG
 /*
  * Utility function that causes End of Stream records to compare after of all
  * others, so that other threads' comparison logic can stay simple.
@@ -1291,6 +1292,7 @@ send_range_after(const struct send_range *from, const struct send_range *to)
 		return (1);
 	return (0);
 }
+#endif
 
 /*
  * Pop the new data off the queue, check that the records we receive are in
@@ -1301,7 +1303,7 @@ static struct send_range *
 get_next_range_nofree(bqueue_t *bq, struct send_range *prev)
 {
 	struct send_range *next = bqueue_dequeue(bq);
-	ASSERTv(send_range_after(prev, next) == -1);
+	ASSERT3S(send_range_after(prev, next), ==, -1);
 	return (next);
 }
 

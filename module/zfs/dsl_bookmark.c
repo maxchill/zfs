@@ -278,8 +278,8 @@ dsl_bookmark_node_add(dsl_dataset_t *hds, dsl_bookmark_node_t *dbn,
 	else if (dbn->dbn_phys.zbm_redaction_obj != 0)
 		bookmark_phys_size = offsetof(zfs_bookmark_phys_t, zbm_flags);
 
-	zfs_bookmark_phys_t zero_phys = { 0 };
-	ASSERTV(!bcmp(((char *)&dbn->dbn_phys) + bookmark_phys_size,
+	ASSERTV(zfs_bookmark_phys_t zero_phys = { 0 });
+	ASSERT0(bcmp(((char *)&dbn->dbn_phys) + bookmark_phys_size,
 	    &zero_phys, sizeof (zfs_bookmark_phys_t) - bookmark_phys_size));
 
 	VERIFY0(zap_add(mos, hds->ds_bookmarks_obj, dbn->dbn_name,
@@ -368,10 +368,10 @@ dsl_bookmark_create_sync_impl(const char *bookmark, const char *snapshot,
 static void
 dsl_bookmark_create_sync(void *arg, dmu_tx_t *tx)
 {
-	dsl_pool_t *dp = dmu_tx_pool(tx);
 	dsl_bookmark_create_arg_t *dbca = arg;
 
-	ASSERTV(spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_BOOKMARKS));
+	ASSERT(spa_feature_is_enabled(dmu_tx_pool(tx)->dp_spa,
+	    SPA_FEATURE_BOOKMARKS));
 
 	for (nvpair_t *pair = nvlist_next_nvpair(dbca->dbca_bmarks, NULL);
 	    pair != NULL; pair = nvlist_next_nvpair(dbca->dbca_bmarks, pair)) {
@@ -962,7 +962,7 @@ void
 dsl_redaction_list_long_hold(dsl_pool_t *dp, redaction_list_t *rl, void *tag)
 {
 	ASSERT(dsl_pool_config_held(dp));
-	(void) refcount_add(&rl->rl_longholds, tag);
+	(void) zfs_refcount_add(&rl->rl_longholds, tag);
 }
 
 void
