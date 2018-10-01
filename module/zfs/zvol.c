@@ -123,7 +123,7 @@ struct zvol_state {
 	uint32_t		zv_open_count;	/* open counts */
 	uint32_t		zv_changed;	/* disk changed */
 	zilog_t			*zv_zilog;	/* ZIL handle */
-	zfs_rlock_t		zv_range_lock;	/* range lock */
+	znode_t			zv_znode;	/* for range locking */
 	dnode_t			*zv_dn;		/* dnode hold */
 	dev_t			zv_dev;		/* device id */
 	struct gendisk		*zv_disk;	/* generic disk */
@@ -1687,8 +1687,10 @@ zvol_alloc(dev_t dev, const char *name)
 	zv->zv_open_count = 0;
 	strlcpy(zv->zv_name, name, MAXNAMELEN);
 
-	zfs_rlock_init(&zv->zv_range_lock);
-	rw_init(&zv->zv_suspend_lock, NULL, RW_DEFAULT, NULL);
+	mutex_init(&zv->zv_znode.z_range_lock, NULL, MUTEX_DEFAULT, NULL);
+	avl_create(&zv->zv_znode.z_range_avl, zfs_range_compare,
+	    sizeof (rl_t), offsetof(rl_t, r_node));
+	zv->zv_znode.z_is_zvol = TRUE;
 
 	zv->zv_disk->major = zvol_major;
 #ifdef HAVE_BLOCK_DEVICE_OPERATIONS_CHECK_EVENTS
@@ -1744,8 +1746,8 @@ zvol_free(void *arg)
 	ASSERT(zv->zv_open_count == 0);
 	ASSERT(zv->zv_disk->private_data == NULL);
 
-	rw_destroy(&zv->zv_suspend_lock);
-	zfs_rlock_destroy(&zv->zv_range_lock);
+	avl_destroy(&zv->zv_znode.z_range_avl);
+	mutex_destroy(&zv->zv_znode.z_range_lock);
 
 	del_gendisk(zv->zv_disk);
 	blk_cleanup_queue(zv->zv_queue);
