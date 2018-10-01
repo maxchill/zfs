@@ -78,6 +78,23 @@ void zfs_range_reduce(rl_t *rl, uint64_t off, uint64_t len);
  */
 int zfs_range_compare(const void *arg1, const void *arg2);
 
+static inline void
+zfs_rlock_init(zfs_rlock_t *zrl)
+{
+	mutex_init(&zrl->zr_mutex, NULL, MUTEX_DEFAULT, NULL);
+	avl_create(&zrl->zr_avl, zfs_range_compare,
+	    sizeof (rl_t), offsetof(rl_t, r_node));
+	zrl->zr_size = NULL;
+	zrl->zr_blksz = NULL;
+	zrl->zr_max_blksz = NULL;
+}
+
+static inline void
+zfs_rlock_destroy(zfs_rlock_t *zrl)
+{
+	avl_destroy(&zrl->zr_avl);
+	mutex_destroy(&zrl->zr_mutex);
+}
 #endif /* _KERNEL */
 
 #ifdef	__cplusplus
