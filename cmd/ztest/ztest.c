@@ -6652,9 +6652,9 @@ ztest_deadman_thread(void *arg)
 {
 	ztest_shared_t *zs = arg;
 	spa_t *spa = ztest_spa;
-	hrtime_t delay, overdue, last_run = gethrtime(), total = 0;
+	hrtime_t delay, overdue, last_run = gethrtime();
 
-	delay = zs->zs_thread_stop - zs->zs_thread_start +
+	delay = (zs->zs_thread_stop - zs->zs_thread_start) +
 	    MSEC2NSEC(zfs_deadman_synctime_ms);
 
 	while (!ztest_exiting) {
@@ -6662,7 +6662,7 @@ ztest_deadman_thread(void *arg)
 		 * Wait for the delay timer while checking occasionally
 		 * if we should stop.
 		 */
-		if (gethrtime() > last_run + delay) {
+		if (gethrtime() < last_run + delay) {
 			(void) poll(NULL, 0, 1000);
 			continue;
 		}
@@ -6686,14 +6686,14 @@ ztest_deadman_thread(void *arg)
 		 * then it may be hung and is terminated.
 		 */
 		overdue = zs->zs_proc_stop + MSEC2NSEC(zfs_deadman_synctime_ms);
-		total += zfs_deadman_synctime_ms / 1000;
 		if (gethrtime() > overdue) {
 			fatal(0, "aborting test after %llu seconds because "
-			    "the process is overdue for termination.", total);
+			    "the process is overdue for termination.",
+			    (gethrtime() - zs->zs_proc_start) / NANOSEC);
 		}
 
 		(void) printf("ztest has been running for %lld seconds\n",
-		    total);
+		    (gethrtime() - zs->zs_proc_start) / NANOSEC);
 
 		last_run = gethrtime();
 		delay = MSEC2NSEC(zfs_deadman_checktime_ms);
@@ -7522,6 +7522,7 @@ main(int argc, char **argv)
 
 	dprintf_setup(&argc, argv);
 	zfs_deadman_synctime_ms = 300000;
+	zfs_deadman_checktime_ms = 30000;
 	/*
 	 * As two-word space map entries may not come up often (especially
 	 * if pool and vdev sizes are small) we want to force at least some
