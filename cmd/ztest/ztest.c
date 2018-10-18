@@ -7542,7 +7542,7 @@ main(int argc, char **argv)
 	 * segments can be reconstructed in a reasonable amount of time
 	 * when reconstruction is known to be possible.
 	 */
-	zfs_reconstruct_indirect_damage_fraction = 4;
+	zfs_reconstruct_indirect_damage_fraction = 100;
 
 	action.sa_handler = sig_handler;
 	sigemptyset(&action.sa_mask);
