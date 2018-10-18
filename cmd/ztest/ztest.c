@@ -463,7 +463,7 @@ static spa_t *ztest_spa = NULL;
 static ztest_ds_t *ztest_ds;
 
 static kmutex_t ztest_vdev_lock;
-static boolean_t ztest_device_removal_active = B_FALSE;
+static kmutex_t ztest_removal_lock;
 static kmutex_t ztest_checkpoint_lock;
 
 /*
@@ -3433,6 +3433,15 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 	if (ztest_opts.zo_mmp_test)
 		return;
 
+	/*
+	 * If a vdev is in the process of being removed, its removal may
+	 * finish while we are in progress, leading to an unexpected error
+	 * value.  Don't bother trying to attach while we are in the middle
+	 * of removal.
+	 */
+	if (!mutex_tryenter(&ztest_removal_lock))
+		return;
+
 	oldpath = umem_alloc(MAXPATHLEN, UMEM_NOFAIL);
 	newpath = umem_alloc(MAXPATHLEN, UMEM_NOFAIL);
 
@@ -3441,17 +3450,6 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 
 	spa_config_enter(spa, SCL_ALL, FTAG, RW_WRITER);
 
-	/*
-	 * If a vdev is in the process of being removed, its removal may
-	 * finish while we are in progress, leading to an unexpected error
-	 * value.  Don't bother trying to attach while we are in the middle
-	 * of removal.
-	 */
-	if (ztest_device_removal_active) {
-		spa_config_exit(spa, SCL_ALL, FTAG);
-		mutex_exit(&ztest_vdev_lock);
-		return;
-	}
 
 	/*
 	 * Decide whether to do an attach or a replace.
@@ -3616,6 +3614,7 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 	}
 out:
 	mutex_exit(&ztest_vdev_lock);
+	mutex_exit(&ztest_removal_lock);
 
 	umem_free(oldpath, MAXPATHLEN);
 	umem_free(newpath, MAXPATHLEN);
@@ -3630,12 +3629,8 @@ ztest_device_removal(ztest_ds_t *zd, uint64_t id)
 	uint64_t guid;
 	int error;
 
+	mutex_enter(&ztest_removal_lock);
 	mutex_enter(&ztest_vdev_lock);
-
-	if (ztest_device_removal_active) {
-		mutex_exit(&ztest_vdev_lock);
-		return;
-	}
 
 	/*
 	 * Remove a random top-level vdev and wait for removal to finish.
@@ -3647,13 +3642,13 @@ ztest_device_removal(ztest_ds_t *zd, uint64_t id)
 
 	error = spa_vdev_remove(spa, guid, B_FALSE);
 	if (error == 0) {
-		ztest_device_removal_active = B_TRUE;
 		mutex_exit(&ztest_vdev_lock);
 
 		while (spa->spa_vdev_removal != NULL)
 			txg_wait_synced(spa_get_dsl(spa), 0);
 	} else {
 		mutex_exit(&ztest_vdev_lock);
+		mutex_exit(&ztest_removal_lock);
 		return;
 	}
 
@@ -3669,9 +3664,7 @@ ztest_device_removal(ztest_ds_t *zd, uint64_t id)
 			txg_wait_synced(spa_get_dsl(spa), 0);
 	}
 
-	mutex_enter(&ztest_vdev_lock);
-	ztest_device_removal_active = B_FALSE;
-	mutex_exit(&ztest_vdev_lock);
+	mutex_exit(&ztest_removal_lock);
 }
 
 /*
@@ -3801,22 +3794,18 @@ ztest_vdev_LUN_growth(ztest_ds_t *zd, uint64_t id)
 	uint64_t top;
 	uint64_t old_class_space, new_class_space, old_ms_count, new_ms_count;
 
-	mutex_enter(&ztest_checkpoint_lock);
-	mutex_enter(&ztest_vdev_lock);
-	spa_config_enter(spa, SCL_STATE, spa, RW_READER);
-
 	/*
 	 * If there is a vdev removal in progress, it could complete while
 	 * we are running, in which case we would not be able to verify
 	 * that the metaslab_class space increased (because it decreases
 	 * when the device removal completes).
 	 */
-	if (ztest_device_removal_active) {
-		spa_config_exit(spa, SCL_STATE, spa);
-		mutex_exit(&ztest_vdev_lock);
-		mutex_exit(&ztest_checkpoint_lock);
+	if (!mutex_tryenter(&ztest_removal_lock))
 		return;
-	}
+
+	mutex_enter(&ztest_checkpoint_lock);
+	mutex_enter(&ztest_vdev_lock);
+	spa_config_enter(spa, SCL_STATE, spa, RW_READER);
 
 	top = ztest_random_vdev_top(spa, B_TRUE);
 
@@ -3845,6 +3834,7 @@ ztest_vdev_LUN_growth(ztest_ds_t *zd, uint64_t id)
 		spa_config_exit(spa, SCL_STATE, spa);
 		mutex_exit(&ztest_vdev_lock);
 		mutex_exit(&ztest_checkpoint_lock);
+		mutex_exit(&ztest_removal_lock);
 		return;
 	}
 	ASSERT(psize > 0);
@@ -3871,6 +3861,7 @@ ztest_vdev_LUN_growth(ztest_ds_t *zd, uint64_t id)
 		spa_config_exit(spa, SCL_STATE, spa);
 		mutex_exit(&ztest_vdev_lock);
 		mutex_exit(&ztest_checkpoint_lock);
+		mutex_exit(&ztest_removal_lock);
 		return;
 	}
 
@@ -3906,6 +3897,7 @@ ztest_vdev_LUN_growth(ztest_ds_t *zd, uint64_t id)
 		spa_config_exit(spa, SCL_STATE, spa);
 		mutex_exit(&ztest_vdev_lock);
 		mutex_exit(&ztest_checkpoint_lock);
+		mutex_exit(&ztest_removal_lock);
 		return;
 	}
 
@@ -3937,6 +3929,7 @@ ztest_vdev_LUN_growth(ztest_ds_t *zd, uint64_t id)
 	spa_config_exit(spa, SCL_STATE, spa);
 	mutex_exit(&ztest_vdev_lock);
 	mutex_exit(&ztest_checkpoint_lock);
+	mutex_exit(&ztest_removal_lock);
 }
 
 /*
@@ -5816,18 +5809,15 @@ ztest_fault_inject(ztest_ds_t *zd, uint64_t id)
 	path0 = umem_alloc(MAXPATHLEN, UMEM_NOFAIL);
 	pathrand = umem_alloc(MAXPATHLEN, UMEM_NOFAIL);
 
-	mutex_enter(&ztest_vdev_lock);
-
 	/*
-	 * Device removal is in progress, fault injection must be disabled
-	 * until it completes and the pool is scrubbed.  The fault injection
-	 * strategy for damaging blocks does not take in to account evacuated
-	 * blocks which may have already been damaged.
+	 * The fault injection strategy for damaging blocks does not take
+	 * in to account evacuated blocks which may have already been damaged.
+	 * It must not run concurrently with device removal.
 	 */
-	if (ztest_device_removal_active) {
-		mutex_exit(&ztest_vdev_lock);
-		goto out;
-	}
+	if (!mutex_tryenter(&ztest_removal_lock))
+		return;
+
+	mutex_enter(&ztest_vdev_lock);
 
 	maxfaults = MAXFAULTS(zs);
 	leaves = MAX(zs->zs_mirrors, 1) * ztest_opts.zo_raidz;
@@ -6058,6 +6048,8 @@ ztest_fault_inject(ztest_ds_t *zd, uint64_t id)
 
 	(void) close(fd);
 out:
+	mutex_exit(&ztest_removal_lock);
+
 	umem_free(path0, MAXPATHLEN);
 	umem_free(pathrand, MAXPATHLEN);
 }
@@ -6187,12 +6179,14 @@ ztest_scrub(ztest_ds_t *zd, uint64_t id)
 	/*
 	 * Scrub in progress by device removal.
 	 */
-	if (ztest_device_removal_active)
+	if (!mutex_tryenter(&ztest_removal_lock))
 		return;
 
 	(void) spa_scan(spa, POOL_SCAN_SCRUB);
 	(void) poll(NULL, 0, 100); /* wait a moment, then force a restart */
 	(void) spa_scan(spa, POOL_SCAN_SCRUB);
+
+	mutex_exit(&ztest_removal_lock);
 }
 
 /*
@@ -6912,7 +6906,9 @@ ztest_run(ztest_shared_t *zs)
 	 * Initialize parent/child shared state.
 	 */
 	mutex_init(&ztest_vdev_lock, NULL, MUTEX_DEFAULT, NULL);
+	mutex_init(&ztest_removal_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&ztest_checkpoint_lock, NULL, MUTEX_DEFAULT, NULL);
+
 	VERIFY0(pthread_rwlock_init(&ztest_name_lock, NULL));
 
 	zs->zs_thread_start = gethrtime();
@@ -7073,6 +7069,7 @@ ztest_run(ztest_shared_t *zs)
 	mutex_destroy(&zcl.zcl_callbacks_lock);
 	(void) pthread_rwlock_destroy(&ztest_name_lock);
 	mutex_destroy(&ztest_vdev_lock);
+	mutex_destroy(&ztest_removal_lock);
 	mutex_destroy(&ztest_checkpoint_lock);
 }
 
