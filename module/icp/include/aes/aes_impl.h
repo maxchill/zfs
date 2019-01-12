@@ -191,9 +191,11 @@ extern const aes_impl_ops_t aes_generic_impl;
 #if defined(__x86_64)
 extern const aes_impl_ops_t aes_x86_64_impl;
 #endif
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
 #if defined(__x86_64) && defined(HAVE_AES)
 extern const aes_impl_ops_t aes_aesni_impl;
 #endif
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */
 
 /*
  * Initializes fastest implementation

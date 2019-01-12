@@ -230,9 +230,11 @@ const aes_impl_ops_t *aes_all_impl[] = {
 #if defined(__x86_64)
 	&aes_x86_64_impl,
 #endif
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
 #if defined(__x86_64) && defined(HAVE_AES)
 	&aes_aesni_impl,
 #endif
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */
 };
 
 /* Indicate that benchmark has been completed */
@@ -304,13 +306,16 @@ aes_impl_init(void)
 	aes_supp_impl_cnt = c;
 
 	/* set fastest implementation. assume hardware accelerated is fastest */
+
 #if defined(__x86_64)
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
 #if defined(HAVE_AES)
 	if (aes_aesni_impl.is_supported())
 		memcpy(&aes_fastest_impl, &aes_aesni_impl,
 		    sizeof (aes_fastest_impl));
 	else
 #endif
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */
 		memcpy(&aes_fastest_impl, &aes_x86_64_impl,
 		    sizeof (aes_fastest_impl));
 #else

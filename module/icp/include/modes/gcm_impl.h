@@ -54,9 +54,12 @@ typedef struct gcm_impl_ops {
 } gcm_impl_ops_t;
 
 extern const gcm_impl_ops_t gcm_generic_impl;
+
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
 #if defined(__x86_64) && defined(HAVE_PCLMULQDQ)
 extern const gcm_impl_ops_t gcm_pclmulqdq_impl;
 #endif
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */
 
 /*
  * Initializes fastest implementation

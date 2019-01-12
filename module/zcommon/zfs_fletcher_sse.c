@@ -41,6 +41,9 @@
  * SOFTWARE.
  */
 
+/* Don't build if we're targeting a kernel that doesn't export FPU functions */
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
+
 #if defined(HAVE_SSE2)
 
 #include <linux/simd_x86.h>
@@ -229,3 +232,4 @@ const fletcher_4_ops_t fletcher_4_ssse3_ops = {
 };
 
 #endif /* defined(HAVE_SSE2) && defined(HAVE_SSSE3) */
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */

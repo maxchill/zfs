@@ -48,6 +48,8 @@ static raidz_impl_ops_t vdev_raidz_fastest_impl = {
 const raidz_impl_ops_t *raidz_all_maths[] = {
 	&vdev_raidz_original_impl,
 	&vdev_raidz_scalar_impl,
+/* Don't build if we're targeting a kernel that doesn't export FPU functions */
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
 #if defined(__x86_64) && defined(HAVE_SSE2)	/* only x86_64 for now */
 	&vdev_raidz_sse2_impl,
 #endif
@@ -63,6 +65,7 @@ const raidz_impl_ops_t *raidz_all_maths[] = {
 #if defined(__x86_64) && defined(HAVE_AVX512BW)	/* only x86_64 for now */
 	&vdev_raidz_avx512bw_impl,
 #endif
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */
 #if defined(__aarch64__)
 	&vdev_raidz_aarch64_neon_impl,
 	&vdev_raidz_aarch64_neonx2_impl,

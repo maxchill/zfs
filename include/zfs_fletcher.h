@@ -90,7 +90,8 @@ typedef struct zfs_fletcher_aarch64_neon {
 typedef union fletcher_4_ctx {
 	zio_cksum_t scalar;
 	zfs_fletcher_superscalar_t superscalar[4];
-
+/* Don't build if we're targeting a kernel that doesn't export FPU functions */
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
 #if defined(HAVE_SSE2) || (defined(HAVE_SSE2) && defined(HAVE_SSSE3))
 	zfs_fletcher_sse_t sse[4];
 #endif
@@ -100,6 +101,7 @@ typedef union fletcher_4_ctx {
 #if defined(__x86_64) && defined(HAVE_AVX512F)
 	zfs_fletcher_avx512_t avx512[4];
 #endif
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */
 #if defined(__aarch64__)
 	zfs_fletcher_aarch64_neon_t aarch64_neon[4];
 #endif

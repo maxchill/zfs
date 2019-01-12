@@ -22,6 +22,9 @@
  * Copyright (C) 2016 Gvozden Nešković. All rights reserved.
  */
 
+/* Don't build if we're targeting a kernel that doesn't export FPU functions */
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
+
 #if defined(__x86_64) && defined(HAVE_AVX512F)
 
 #include <linux/simd_x86.h>
@@ -172,3 +175,4 @@ const fletcher_4_ops_t fletcher_4_avx512f_ops = {
 };
 
 #endif /* defined(__x86_64) && defined(HAVE_AVX512F) */
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */

@@ -22,6 +22,9 @@
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  */
 
+/* Don't build if we're targeting a kernel that doesn't export FPU functions */
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
+
 #if defined(__x86_64) && defined(HAVE_AES)
 
 #include <linux/simd_x86.h>
@@ -121,3 +124,4 @@ const aes_impl_ops_t aes_aesni_impl = {
 };
 
 #endif /* defined(__x86_64) && defined(HAVE_AES) */
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */

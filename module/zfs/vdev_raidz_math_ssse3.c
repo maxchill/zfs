@@ -22,6 +22,9 @@
  * Copyright (C) 2016 Gvozden Nešković. All rights reserved.
  */
 
+/* Don't build if we're targeting a kernel that doesn't export FPU functions */
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
+
 #include <sys/isa_defs.h>
 
 #if defined(__x86_64) && defined(HAVE_SSSE3)
@@ -2473,3 +2476,4 @@ __attribute__((aligned(256))) gf_clmul_mod_lt[4*256][16] =
 /* END CSTYLED */
 #endif /* defined(HAVE_SSSE3) || defined(HAVE_AVX2) || defined(HAVE_AVX512BW) */
 #endif /* defined(__x86_64) */
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */

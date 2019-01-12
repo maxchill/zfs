@@ -638,9 +638,11 @@ static gcm_impl_ops_t gcm_fastest_impl = {
 /* All compiled in implementations */
 const gcm_impl_ops_t *gcm_all_impl[] = {
 	&gcm_generic_impl,
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
 #if defined(__x86_64) && defined(HAVE_PCLMULQDQ)
 	&gcm_pclmulqdq_impl,
 #endif
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */
 };
 
 /* Indicate that benchmark has been completed */
@@ -712,12 +714,14 @@ gcm_impl_init(void)
 	gcm_supp_impl_cnt = c;
 
 	/* set fastest implementation. assume hardware accelerated is fastest */
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
 #if defined(__x86_64) && defined(HAVE_PCLMULQDQ)
 	if (gcm_pclmulqdq_impl.is_supported())
 		memcpy(&gcm_fastest_impl, &gcm_pclmulqdq_impl,
 		    sizeof (gcm_fastest_impl));
 	else
 #endif
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */
 		memcpy(&gcm_fastest_impl, &gcm_generic_impl,
 		    sizeof (gcm_fastest_impl));
 

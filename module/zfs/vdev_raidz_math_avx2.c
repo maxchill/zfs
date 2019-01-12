@@ -21,6 +21,10 @@
 /*
  * Copyright (C) 2016 Gvozden Nešković. All rights reserved.
  */
+
+/* Don't build if we're targeting a kernel that doesn't export FPU functions */
+#if !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU)
+
 #include <sys/isa_defs.h>
 
 #if defined(__x86_64) && defined(HAVE_AVX2)
@@ -409,3 +413,4 @@ const raidz_impl_ops_t vdev_raidz_avx2_impl = {
 };
 
 #endif /* defined(__x86_64) && defined(HAVE_AVX2) */
+#endif /* !defined(_KERNEL) || defined(KERNEL_EXPORTS_X86_FPU) */

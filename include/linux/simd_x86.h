@@ -81,7 +81,7 @@
 #endif
 
 #if defined(_KERNEL)
-#if defined(HAVE_FPU_API_H)
+#if defined(HAVE_UNDERSCORE_KERNEL_FPU)
 #include <asm/fpu/api.h>
 #include <asm/fpu/internal.h>
 #define	kfpu_begin()		\
@@ -94,12 +94,18 @@
 	__kernel_fpu_end();		\
 	preempt_enable();		\
 }
-#else
+#elif defined(HAVE_KERNEL_FPU)
 #include <asm/i387.h>
 #include <asm/xcr.h>
 #define	kfpu_begin()	kernel_fpu_begin()
 #define	kfpu_end()		kernel_fpu_end()
-#endif /* defined(HAVE_FPU_API_H) */
+#else
+/* Kernel doesn't export any kernel_fpu_* functions */
+#include <asm/fpu/internal.h>	/* For kernel xgetbv() */
+#define	kfpu_begin() 	panic("This code should never run")
+#define	kfpu_end() 	panic("This code should never run")
+#endif /* defined(HAVE_KERNEL_FPU) */
+
 #else
 /*
  * fpu dummy methods for userspace
