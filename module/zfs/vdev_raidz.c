@@ -29,7 +29,6 @@
 #include <sys/zfs_context.h>
 #include <sys/spa.h>
 #include <sys/vdev_impl.h>
-#include <sys/vdev_trim.h>
 #include <sys/zio.h>
 #include <sys/zio_checksum.h>
 #include <sys/abd.h>
@@ -37,7 +36,6 @@
 #include <sys/fm/fs/zfs.h>
 #include <sys/vdev_raidz.h>
 #include <sys/vdev_raidz_impl.h>
-#include <sys/dkioc_free_util.h>
 
 #ifdef ZFS_DEBUG
 #include <sys/vdev.h>	/* vdev_xlate testing */
@@ -433,20 +431,18 @@ vdev_raidz_map_alloc(zio_t *zio, uint64_t ashift, uint64_t dcols,
 	ASSERT3U(rm->rm_asize - asize, ==, rm->rm_nskip << ashift);
 	ASSERT3U(rm->rm_nskip, <=, nparity);
 
-	if (zio->io_abd != NULL) {
-		for (c = 0; c < rm->rm_firstdatacol; c++)
-			rm->rm_col[c].rc_abd =
-			    abd_alloc_linear(rm->rm_col[c].rc_size, B_FALSE);
+	for (c = 0; c < rm->rm_firstdatacol; c++)
+		rm->rm_col[c].rc_abd =
+		    abd_alloc_linear(rm->rm_col[c].rc_size, B_FALSE);
 
-		rm->rm_col[c].rc_abd = abd_get_offset_size(zio->io_abd, 0,
+	rm->rm_col[c].rc_abd = abd_get_offset_size(zio->io_abd, 0,
+	    rm->rm_col[c].rc_size);
+	off = rm->rm_col[c].rc_size;
+
+	for (c = c + 1; c < acols; c++) {
+		rm->rm_col[c].rc_abd = abd_get_offset_size(zio->io_abd, off,
 		    rm->rm_col[c].rc_size);
-		off = rm->rm_col[c].rc_size;
-
-		for (c = c + 1; c < acols; c++) {
-			rm->rm_col[c].rc_abd = abd_get_offset_size(zio->io_abd,
-			    off, rm->rm_col[c].rc_size);
-			off += rm->rm_col[c].rc_size;
-		}
+		off += rm->rm_col[c].rc_size;
 	}
 
 	/*
@@ -2074,9 +2070,6 @@ vdev_raidz_io_done(zio_t *zio)
 	int tgts[VDEV_RAIDZ_MAXPARITY];
 	int code;
 
-	if (ZIO_IS_TRIM(zio))
-		return;
-
 	ASSERT(zio->io_bp != NULL);  /* XXX need to add code to enforce this */
 
 	ASSERT(rm->rm_missingparity <= rm->rm_firstdatacol);
@@ -2405,125 +2398,6 @@ vdev_raidz_xlate(vdev_t *cvd, const range_seg_t *in, range_seg_t *res)
 	ASSERT3U(res->rs_end - res->rs_start, <=, in->rs_end - in->rs_start);
 }
 
-static inline void
-vdev_raidz_trim_append(dkioc_free_list_t *dfl, uint64_t *num_extsp,
-    uint64_t offset, uint64_t size)
-{
-	uint64_t num_exts = *num_extsp;
-
-	ASSERT(size != 0);
-
-	if (dfl->dfl_num_exts > 0 &&
-	    dfl->dfl_exts[num_exts - 1].dfle_start +
-	    dfl->dfl_exts[num_exts - 1].dfle_length == offset) {
-		dfl->dfl_exts[num_exts - 1].dfle_length += size;
-	} else {
-		dfl->dfl_exts[num_exts].dfle_start = offset;
-		dfl->dfl_exts[num_exts].dfle_length = size;
-		(*num_extsp)++;
-	}
-}
-
-/*
- * Processes a trim for a raidz vdev. Because trims deal with physical
- * addresses, we can't simply pass through our logical vdev addresses to
- * the underlying devices. Instead, we compute a raidz map based on the
- * logical extent addresses provided to us and construct new extent
- * lists that then go to each component vdev.
- */
-static void
-vdev_raidz_trim(vdev_t *vd, zio_t *pio, dkioc_free_list_t *dfl,
-    zio_priority_t priority)
-{
-	const uint64_t children = vd->vdev_children;
-	dkioc_free_list_t **sub_dfls;
-	uint64_t *sub_dfls_num_exts;
-
-	sub_dfls = kmem_zalloc(sizeof (*sub_dfls) * children, KM_SLEEP);
-	sub_dfls_num_exts = kmem_zalloc(sizeof (uint64_t) * children, KM_SLEEP);
-
-	for (int i = 0; i < children; i++) {
-		/*
-		 * We might over-allocate here, because the sub-lists can never
-		 * be longer than the parent list, but they can be shorter.
-		 * The underlying driver will discard zero-length extents.
-		 */
-		sub_dfls[i] = dfl_alloc(dfl->dfl_num_exts, KM_SLEEP);
-		sub_dfls[i]->dfl_num_exts = dfl->dfl_num_exts;
-		sub_dfls[i]->dfl_flags = dfl->dfl_flags;
-		sub_dfls[i]->dfl_offset = dfl->dfl_offset;
-		/* don't copy the check func, because it isn't raidz-aware */
-	}
-
-	/*
-	 * Process all extents and redistribute them to the component vdevs.
-	 *
-	 * 1. Calculate the number of child drives, i.e. cols, which may be
-	 *    smaller than vdev_children
-	 * 2. For each child drive, calculate offset and size:
-	 *    a. 'offset' needs to be increased by 1 sector, when the drive
-	 *       wraps around to the next row, because the 1st drive does
-	 *       not necessarily begin at the 1st raidz child drive.
-	 *    b. 'size' needs to be increased by 1 sector, for the first
-	 *       remainder drives, because the extent doesn't always divide
-	 *       cleanly by cols, i.e. some drives may contribute more space
-	 *       to the extent.
-	 */
-	for (int i = 0; i < dfl->dfl_num_exts; i++) {
-		uint64_t start = dfl->dfl_exts[i].dfle_start;
-		uint64_t length = dfl->dfl_exts[i].dfle_length;
-		uint64_t ashift = vd->vdev_top->vdev_ashift;
-		uint64_t b = start >> ashift;
-		uint64_t s = length >> ashift;
-		/* The first column for this stripe. */
-		uint64_t f = b % children;
-		uint64_t cols = (s < children) ? s : children;
-		uint64_t remainder = s % cols;
-
-		ASSERT0(P2PHASE(start, 1ULL << ashift));
-		ASSERT0(P2PHASE(length, 1ULL << ashift));
-
-		if (length <= vd->vdev_nparity << vd->vdev_top->vdev_ashift)
-			continue;
-
-		for (int j = 0; j < cols; j++) {
-			uint64_t devidx = f + j;
-			uint64_t offset = b / children;
-			uint64_t size = s / cols;
-
-			if (j < remainder)
-				size++;
-
-			if (devidx >= children) {
-				offset++;
-				devidx -= children;
-			}
-
-			size <<= ashift;
-			offset <<= ashift;
-			vdev_raidz_trim_append(sub_dfls[devidx],
-			    &sub_dfls_num_exts[devidx], offset, size);
-			length -= size;
-		}
-		ASSERT0(length);
-	}
-
-	/*
-	 * Issue the component ioctls as children of the parent zio.
-	 */
-	for (int i = 0; i < children; i++) {
-		if (sub_dfls_num_exts[i] != 0) {
-			vdev_t *child = vd->vdev_child[i];
-			zio_nowait(zio_trim_dfl(pio, child, sub_dfls[i],
-			    NULL, NULL, priority, 0, B_FALSE));
-		} else {
-			dfl_free(sub_dfls[i]);
-		}
-	}
-	kmem_free(sub_dfls, sizeof (*sub_dfls) * children);
-	kmem_free(sub_dfls_num_exts, sizeof (uint64_t) * children);
-}
-
 vdev_ops_t vdev_raidz_ops = {
 	.vdev_op_open =		vdev_raidz_open,
 	.vdev_op_close =	vdev_raidz_close,
@@ -2535,7 +2409,6 @@ vdev_ops_t vdev_raidz_ops = {
 	.vdev_op_hold =		NULL,
 	.vdev_op_rele =		NULL,
 	.vdev_op_xlate =	vdev_raidz_xlate,
-	.vdev_op_trim =		vdev_raidz_trim,
 	.vdev_op_type =		VDEV_TYPE_RAIDZ, /* name of this vdev type */
 	.vdev_op_leaf =		B_FALSE		/* not a leaf vdev */
 };

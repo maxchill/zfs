@@ -526,21 +526,13 @@ range_tree_contains(range_tree_t *rt, uint64_t start, uint64_t size)
 }
 
 /*
- * Same as range_tree_contains, but locates even just a partial overlap.
- */
-boolean_t
-range_tree_contains_part(range_tree_t *rt, uint64_t start, uint64_t size)
-{
-	return (range_tree_find_impl(rt, start, size) != NULL);
-}
-
-/*
  * Ensure that this range is not in the tree, regardless of whether
  * it is currently in the tree.
  */
 void
-range_tree_clear(range_tree_t *rt, uint64_t start, uint64_t size)
+range_tree_clear(void *arg, uint64_t start, uint64_t size)
 {
+	range_tree_t *rt = arg;
 	range_seg_t *rs;
 
 	if (size == 0)

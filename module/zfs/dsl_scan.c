@@ -24,7 +24,6 @@
  * Copyright 2016 Gary Mills
  * Copyright (c) 2017 Datto Inc.
  * Copyright 2017 Joyent, Inc.
- * Copyright 2017 Nexenta Systems, Inc. All rights reserved.
  */
 
 #include <sys/dsl_scan.h>

@@ -56,7 +56,9 @@ extern void vdev_trim_stop(vdev_t *vd, vdev_trim_state_t tgt, list_t *vd_list);
 extern void vdev_trim_stop_all(vdev_t *vd, vdev_trim_state_t tgt_state);
 extern void vdev_trim_stop_wait(spa_t *spa, list_t *vd_list);
 extern void vdev_trim_restart(vdev_t *vd);
-extern void vdev_auto_trim(vdev_trim_info_t *vti);
+extern void vdev_auto_trim(spa_t *spa);
+extern void vdev_auto_trim_stop(spa_t *spa);
+extern void vdev_auto_trim_restart(spa_t *spa);
 extern uint64_t vdev_trim_min_rate(spa_t *spa);
 extern void vdev_trim_stat_update(zio_t *zio, uint64_t psize,
     vdev_trim_stat_flags_t flags);

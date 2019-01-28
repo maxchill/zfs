@@ -636,10 +636,9 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_VDEV_ASYNC_R_ACTIVE_QUEUE	"vdev_async_r_active_queue"
 #define	ZPOOL_CONFIG_VDEV_ASYNC_W_ACTIVE_QUEUE	"vdev_async_w_active_queue"
 #define	ZPOOL_CONFIG_VDEV_SCRUB_ACTIVE_QUEUE	"vdev_async_scrub_active_queue"
-#define	ZPOOL_CONFIG_VDEV_AUTO_TRIM_ACTIVE_QUEUE \
-	"vdev_async_auto_trim_active_queue"
-#define	ZPOOL_CONFIG_VDEV_MAN_TRIM_ACTIVE_QUEUE \
-	"vdev_async_man_trim_active_queue"
+#define	ZPOOL_CONFIG_VDEV_TRIM_ACTIVE_QUEUE	"vdev_async_trim_active_queue"
+#define	ZPOOL_CONFIG_VDEV_AUTOTRIM_ACTIVE_QUEUE \
+	"vdev_async_autotrim_active_queue"
 
 /* Queue sizes */
 #define	ZPOOL_CONFIG_VDEV_SYNC_R_PEND_QUEUE	"vdev_sync_r_pend_queue"
@@ -647,10 +646,8 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_VDEV_ASYNC_R_PEND_QUEUE	"vdev_async_r_pend_queue"
 #define	ZPOOL_CONFIG_VDEV_ASYNC_W_PEND_QUEUE	"vdev_async_w_pend_queue"
 #define	ZPOOL_CONFIG_VDEV_SCRUB_PEND_QUEUE	"vdev_async_scrub_pend_queue"
-#define	ZPOOL_CONFIG_VDEV_AUTO_TRIM_PEND_QUEUE \
-	"vdev_async_auto_trim_pend_queue"
-#define	ZPOOL_CONFIG_VDEV_MAN_TRIM_PEND_QUEUE \
-	"vdev_async_man_trim_pend_queue"
+#define	ZPOOL_CONFIG_VDEV_TRIM_PEND_QUEUE	"vdev_async_trim_pend_queue"
+#define	ZPOOL_CONFIG_VDEV_AUTOTRIM_PEND_QUEUE	"vdev_async_autotrim_pend_queue"
 
 /* Latency read/write histogram stats */
 #define	ZPOOL_CONFIG_VDEV_TOT_R_LAT_HISTO	"vdev_tot_r_lat_histo"
@@ -662,8 +659,8 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_VDEV_ASYNC_R_LAT_HISTO	"vdev_async_r_lat_histo"
 #define	ZPOOL_CONFIG_VDEV_ASYNC_W_LAT_HISTO	"vdev_async_w_lat_histo"
 #define	ZPOOL_CONFIG_VDEV_SCRUB_LAT_HISTO	"vdev_scrub_histo"
-#define	ZPOOL_CONFIG_VDEV_AUTO_TRIM_LAT_HISTO	"vdev_auto_trim_histo"
-#define	ZPOOL_CONFIG_VDEV_MAN_TRIM_LAT_HISTO	"vdev_man_trim_histo"
+#define	ZPOOL_CONFIG_VDEV_TRIM_LAT_HISTO	"vdev_trim_histo"
+#define	ZPOOL_CONFIG_VDEV_AUTOTRIM_LAT_HISTO	"vdev_autotrim_histo"
 
 /* Request size histograms */
 #define	ZPOOL_CONFIG_VDEV_SYNC_IND_R_HISTO	"vdev_sync_ind_r_histo"
@@ -676,8 +673,8 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_VDEV_ASYNC_AGG_R_HISTO	"vdev_async_agg_r_histo"
 #define	ZPOOL_CONFIG_VDEV_ASYNC_AGG_W_HISTO	"vdev_async_agg_w_histo"
 #define	ZPOOL_CONFIG_VDEV_AGG_SCRUB_HISTO	"vdev_agg_scrub_histo"
-#define	ZPOOL_CONFIG_VDEV_IND_AUTO_TRIM_HISTO	"vdev_ind_auto_trim_histo"
-#define	ZPOOL_CONFIG_VDEV_IND_MAN_TRIM_HISTO	"vdev_ind_man_trim_histo"
+#define	ZPOOL_CONFIG_VDEV_IND_TRIM_HISTO	"vdev_ind_trim_histo"
+#define	ZPOOL_CONFIG_VDEV_IND_AUTOTRIM_HISTO	"vdev_ind_autotrim_histo"
 
 /* Number of slow IOs */
 #define	ZPOOL_CONFIG_VDEV_SLOW_IOS		"vdev_slow_ios"
@@ -799,15 +796,15 @@ typedef struct zpool_load_policy {
 
 /* vdev TRIM state */
 #define	VDEV_LEAF_ZAP_TRIM_LAST_OFFSET	\
-	"com.nexenta:next_offset_to_trim"
+	"org.zfsonlinux:next_offset_to_trim"
 #define	VDEV_LEAF_ZAP_TRIM_STATE	\
-	"com.nexenta:vdev_trim_state"
+	"org.zfsonlinux:vdev_trim_state"
 #define	VDEV_LEAF_ZAP_TRIM_ACTION_TIME	\
-	"com.nexenta:vdev_trim_action_time"
+	"org.zfsonlinux:vdev_trim_action_time"
 #define	VDEV_LEAF_ZAP_TRIM_RATE		\
-	"com.nexenta:vdev_trim_rate"
+	"org.zfsonlinux:vdev_trim_rate"
 #define	VDEV_LEAF_ZAP_TRIM_FULL		\
-	"com.nexenta:vdev_trim_full"
+	"org.zfsonlinux:vdev_trim_full"
 
 /*
  * This is needed in userland to report the minimum necessary device size.

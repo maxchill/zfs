@@ -270,8 +270,8 @@ vdev_queue_class_min_active(zio_priority_t p)
 		return (zfs_vdev_removal_min_active);
 	case ZIO_PRIORITY_INITIALIZING:
 		return (zfs_vdev_initializing_min_active);
-	case ZIO_PRIORITY_AUTO_TRIM:
-	case ZIO_PRIORITY_MAN_TRIM:
+	case ZIO_PRIORITY_TRIM:
+	case ZIO_PRIORITY_AUTOTRIM:
 		return (zfs_vdev_trim_min_active);
 	default:
 		panic("invalid priority %u", p);
@@ -345,8 +345,8 @@ vdev_queue_class_max_active(spa_t *spa, zio_priority_t p)
 		return (zfs_vdev_removal_max_active);
 	case ZIO_PRIORITY_INITIALIZING:
 		return (zfs_vdev_initializing_max_active);
-	case ZIO_PRIORITY_AUTO_TRIM:
-	case ZIO_PRIORITY_MAN_TRIM:
+	case ZIO_PRIORITY_TRIM:
+	case ZIO_PRIORITY_AUTOTRIM:
 		return (zfs_vdev_trim_max_active);
 	default:
 		panic("invalid priority %u", p);
@@ -421,7 +421,7 @@ vdev_queue_init(vdev_t *vd)
 		 */
 		if (p == ZIO_PRIORITY_SYNC_READ ||
 		    p == ZIO_PRIORITY_SYNC_WRITE ||
-		    p == ZIO_PRIORITY_AUTO_TRIM || p == ZIO_PRIORITY_MAN_TRIM)
+		    p == ZIO_PRIORITY_TRIM || p == ZIO_PRIORITY_AUTOTRIM)
 			compfn = vdev_queue_timestamp_compare;
 		else
 			compfn = vdev_queue_offset_compare;
@@ -782,8 +782,8 @@ again:
 	vdev_queue_pending_add(vq, zio);
 
 	/* trim I/Os have no single meaningful offset */
-	if (zio->io_priority != ZIO_PRIORITY_AUTO_TRIM &&
-	    zio->io_priority != ZIO_PRIORITY_MAN_TRIM)
+	if (zio->io_priority != ZIO_PRIORITY_TRIM &&
+	    zio->io_priority != ZIO_PRIORITY_AUTOTRIM)
 		vq->vq_last_offset = zio->io_offset + zio->io_size;
 
 	return (zio);

@@ -559,10 +559,6 @@ extern zio_t *zio_claim(zio_t *pio, spa_t *spa, uint64_t txg,
 extern zio_t *zio_ioctl(zio_t *pio, spa_t *spa, vdev_t *vd, int cmd,
     zio_done_func_t *done, void *private, enum zio_flag flags);
 
-extern zio_t *zio_trim_tree(zio_t *pio, spa_t *spa, vdev_t *vd,
-    struct range_tree *tree, zio_done_func_t *done, void *private,
-    zio_priority_t priority, enum zio_flag flags, metaslab_t *msp);
-
 extern zio_t *zio_trim_dfl(zio_t *pio, vdev_t *vd, dkioc_free_list_t *dfl,
     zio_done_func_t *done, void *private, zio_priority_t priority,
     enum zio_flag flags, boolean_t dfl_free_on_destroy);

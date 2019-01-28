@@ -206,8 +206,8 @@ static const char *vsx_type_to_nvlist[IOS_COUNT][13] = {
 	    ZPOOL_CONFIG_VDEV_ASYNC_R_LAT_HISTO,
 	    ZPOOL_CONFIG_VDEV_ASYNC_W_LAT_HISTO,
 	    ZPOOL_CONFIG_VDEV_SCRUB_LAT_HISTO,
-	    ZPOOL_CONFIG_VDEV_AUTO_TRIM_LAT_HISTO,
-	    ZPOOL_CONFIG_VDEV_MAN_TRIM_LAT_HISTO,
+	    ZPOOL_CONFIG_VDEV_AUTOTRIM_LAT_HISTO,
+	    ZPOOL_CONFIG_VDEV_TRIM_LAT_HISTO,
 	    NULL},
 	[IOS_LATENCY] = {
 	    ZPOOL_CONFIG_VDEV_TOT_R_LAT_HISTO,
@@ -215,8 +215,8 @@ static const char *vsx_type_to_nvlist[IOS_COUNT][13] = {
 	    ZPOOL_CONFIG_VDEV_DISK_R_LAT_HISTO,
 	    ZPOOL_CONFIG_VDEV_DISK_W_LAT_HISTO,
 	    ZPOOL_CONFIG_VDEV_SCRUB_LAT_HISTO,
-	    ZPOOL_CONFIG_VDEV_AUTO_TRIM_LAT_HISTO,
-	    ZPOOL_CONFIG_VDEV_MAN_TRIM_LAT_HISTO,
+	    ZPOOL_CONFIG_VDEV_TRIM_LAT_HISTO,
+	    ZPOOL_CONFIG_VDEV_AUTOTRIM_LAT_HISTO,
 	    NULL},
 	[IOS_QUEUES] = {
 	    ZPOOL_CONFIG_VDEV_SYNC_R_ACTIVE_QUEUE,
@@ -224,8 +224,8 @@ static const char *vsx_type_to_nvlist[IOS_COUNT][13] = {
 	    ZPOOL_CONFIG_VDEV_ASYNC_R_ACTIVE_QUEUE,
 	    ZPOOL_CONFIG_VDEV_ASYNC_W_ACTIVE_QUEUE,
 	    ZPOOL_CONFIG_VDEV_SCRUB_ACTIVE_QUEUE,
-	    ZPOOL_CONFIG_VDEV_AUTO_TRIM_ACTIVE_QUEUE,
-	    ZPOOL_CONFIG_VDEV_MAN_TRIM_ACTIVE_QUEUE,
+	    ZPOOL_CONFIG_VDEV_TRIM_ACTIVE_QUEUE,
+	    ZPOOL_CONFIG_VDEV_AUTOTRIM_ACTIVE_QUEUE,
 	    NULL},
 	[IOS_RQ_HISTO] = {
 	    ZPOOL_CONFIG_VDEV_SYNC_IND_R_HISTO,
@@ -238,8 +238,8 @@ static const char *vsx_type_to_nvlist[IOS_COUNT][13] = {
 	    ZPOOL_CONFIG_VDEV_ASYNC_AGG_W_HISTO,
 	    ZPOOL_CONFIG_VDEV_IND_SCRUB_HISTO,
 	    ZPOOL_CONFIG_VDEV_AGG_SCRUB_HISTO,
-	    ZPOOL_CONFIG_VDEV_IND_AUTO_TRIM_HISTO,
-	    ZPOOL_CONFIG_VDEV_IND_MAN_TRIM_HISTO,
+	    ZPOOL_CONFIG_VDEV_IND_TRIM_HISTO,
+	    ZPOOL_CONFIG_VDEV_IND_AUTOTRIM_HISTO,
 	    NULL},
 };
 
@@ -3441,10 +3441,10 @@ static const name_and_columns_t iostat_top_labels[][IOSTAT_MAX_LABELS] =
 	[IOS_DEFAULT] = {{"capacity", 2}, {"operations", 2}, {"bandwidth", 2},
 	    {NULL}},
 	[IOS_LATENCY] = {{"total_wait", 2}, {"disk_wait", 2}, {"syncq_wait", 2},
-	    {"asyncq_wait", 2}, {"scrub"}, {"atrim"}, {"mtrim"}},
+	    {"asyncq_wait", 2}, {"scrub"}, {"trim"}, {"autotrim"}},
 	[IOS_QUEUES] = {{"syncq_read", 2}, {"syncq_write", 2},
 	    {"asyncq_read", 2}, {"asyncq_write", 2}, {"scrubq_read", 2},
-	    {"auto_trimq", 2}, {"man_trimq", 2}, {NULL}},
+	    {"trimq", 2}, {"autotrimq", 2}, {NULL}},
 	[IOS_L_HISTO] = {{"total_wait", 2}, {"disk_wait", 2},
 	    {"sync_queue", 2}, {"async_queue", 2}, {NULL}},
 	[IOS_RQ_HISTO] = {{"sync_read", 2}, {"sync_write", 2},
@@ -3465,10 +3465,10 @@ static const name_and_columns_t iostat_bottom_labels[][IOSTAT_MAX_LABELS] =
 	    {"activ"}, {"pend"}, {"activ"}, {"pend"}, {"activ"},
 	    {"pend"}, {"activ"}, {"pend"}, {"activ"}, {NULL}},
 	[IOS_L_HISTO] = {{"read"}, {"write"}, {"read"}, {"write"}, {"read"},
-	    {"write"}, {"read"}, {"write"}, {"scrub"}, {"atrim"},
-	    {"mtrim"}, {NULL}},
+	    {"write"}, {"read"}, {"write"}, {"scrub"}, {"trim"},
+	    {"autotrim"}, {NULL}},
 	[IOS_RQ_HISTO] = {{"ind"}, {"agg"}, {"ind"}, {"agg"}, {"ind"}, {"agg"},
-	    {"ind"}, {"agg"}, {"ind"}, {"agg"}, {"auto"}, {"man"}, {NULL}},
+	    {"ind"}, {"agg"}, {"ind"}, {"agg"}, {"man"}, {"auto"}, {NULL}},
 };
 
 static const char *histo_to_title[] = {
@@ -4092,10 +4092,10 @@ print_iostat_queues(iostat_cbdata_t *cb, nvlist_t *oldnv,
 		ZPOOL_CONFIG_VDEV_ASYNC_W_ACTIVE_QUEUE,
 		ZPOOL_CONFIG_VDEV_SCRUB_PEND_QUEUE,
 		ZPOOL_CONFIG_VDEV_SCRUB_ACTIVE_QUEUE,
-		ZPOOL_CONFIG_VDEV_AUTO_TRIM_PEND_QUEUE,
-		ZPOOL_CONFIG_VDEV_AUTO_TRIM_ACTIVE_QUEUE,
-		ZPOOL_CONFIG_VDEV_MAN_TRIM_PEND_QUEUE,
-		ZPOOL_CONFIG_VDEV_MAN_TRIM_ACTIVE_QUEUE,
+		ZPOOL_CONFIG_VDEV_TRIM_PEND_QUEUE,
+		ZPOOL_CONFIG_VDEV_TRIM_ACTIVE_QUEUE,
+		ZPOOL_CONFIG_VDEV_AUTOTRIM_PEND_QUEUE,
+		ZPOOL_CONFIG_VDEV_AUTOTRIM_ACTIVE_QUEUE,
 	};
 
 	struct stat_array *nva;
@@ -4134,8 +4134,8 @@ print_iostat_latency(iostat_cbdata_t *cb, nvlist_t *oldnv,
 		ZPOOL_CONFIG_VDEV_ASYNC_R_LAT_HISTO,
 		ZPOOL_CONFIG_VDEV_ASYNC_W_LAT_HISTO,
 		ZPOOL_CONFIG_VDEV_SCRUB_LAT_HISTO,
-		ZPOOL_CONFIG_VDEV_AUTO_TRIM_LAT_HISTO,
-		ZPOOL_CONFIG_VDEV_MAN_TRIM_LAT_HISTO,
+		ZPOOL_CONFIG_VDEV_TRIM_LAT_HISTO,
+		ZPOOL_CONFIG_VDEV_AUTOTRIM_LAT_HISTO,
 	};
 	struct stat_array *nva;
 

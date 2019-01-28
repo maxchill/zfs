@@ -739,8 +739,7 @@ typedef enum spa_import_type {
 } spa_import_type_t;
 
 /*
- * Should we force sending TRIM commands even to devices which evidently
- * don't support it?
+ * Force sending TRIM commands even to devices which claim to not support it.
  *	OFF: no, only send to devices which indicated support
  *	ON: yes, force send to everybody
  */
@@ -750,8 +749,7 @@ typedef enum {
 } spa_force_trim_t;
 
 /*
- * Should we send TRIM commands in-line during normal pool operation while
- * deleting stuff?
+ * Send TRIM commands in-line during normal pool operation while deleting.
  *	OFF: no
  *	ON: yes
  */
@@ -795,9 +793,8 @@ extern int spa_scan_get_stats(spa_t *spa, pool_scan_stat_t *ps);
 #define	SPA_ASYNC_REMOVE_DONE			0x40
 #define	SPA_ASYNC_REMOVE_STOP			0x80
 #define	SPA_ASYNC_INITIALIZE_RESTART		0x100
-#define	SPA_ASYNC_MAN_TRIM_RESTART		0x200
-#define	SPA_ASYNC_AUTO_TRIM_TASKQ_CREATE	0x400
-#define	SPA_ASYNC_AUTO_TRIM_TASKQ_DESTROY	0x800
+#define	SPA_ASYNC_TRIM_RESTART			0x200
+#define	SPA_ASYNC_AUTOTRIM			0x400
 
 /*
  * Controls the behavior of spa_vdev_remove().
@@ -914,6 +911,7 @@ typedef struct spa_stats {
 	spa_history_kstat_t	io_history;
 	spa_history_list_t	mmp_history;
 	spa_history_kstat_t	state;		/* pool state */
+	spa_history_kstat_t	iostats;
 } spa_stats_t;
 
 typedef enum txg_state {
@@ -932,6 +930,20 @@ typedef struct txg_stat {
 	uint64_t		ndirty;
 } txg_stat_t;
 
+/* Assorted spa kstats */
+typedef struct spa_iostats {
+	kstat_named_t	trim_extents_written;
+	kstat_named_t	trim_bytes_written;
+	kstat_named_t	trim_extents_skipped;
+	kstat_named_t	trim_bytes_skipped;
+	kstat_named_t	trim_errors;
+	kstat_named_t	autotrim_extents_written;
+	kstat_named_t	autotrim_bytes_written;
+	kstat_named_t	autotrim_extents_skipped;
+	kstat_named_t	autotrim_bytes_skipped;
+	kstat_named_t	autotrim_errors;
+} spa_iostats_t;
+
 extern void spa_stats_init(spa_t *spa);
 extern void spa_stats_destroy(spa_t *spa);
 extern void spa_read_history_add(spa_t *spa, const zbookmark_phys_t *zb,
@@ -949,6 +961,9 @@ extern int spa_mmp_history_set(spa_t *spa, uint64_t mmp_kstat_id, int io_error,
 extern void spa_mmp_history_add(spa_t *spa, uint64_t txg, uint64_t timestamp,
     uint64_t mmp_delay, vdev_t *vd, int label, uint64_t mmp_kstat_id,
     int error);
+extern void spa_iostats_trim_add(spa_t *spa, zio_priority_t priority,
+    uint64_t extents_written, uint64_t bytes_written,
+    uint64_t extents_skipped, uint64_t bytes_skipped, uint64_t errors);
 
 /* Pool configuration locks */
 extern int spa_config_tryenter(spa_t *spa, int locks, void *tag, krw_t rw);
@@ -1147,11 +1162,6 @@ extern void spa_configfile_set(spa_t *, nvlist_t *, boolean_t);
 /* asynchronous event notification */
 extern void spa_event_notify(spa_t *spa, vdev_t *vdev, nvlist_t *hist_nvl,
     const char *name);
-
-/* TRIM/UNMAP kstat update */
-extern void spa_trimstats_update(spa_t *spa, uint64_t extents, uint64_t bytes,
-    uint64_t extents_skipped, uint64_t bytes_skipped);
-extern void spa_trimstats_auto_slow_incr(spa_t *spa);
 
 #ifdef ZFS_DEBUG
 #define	dprintf_bp(bp, fmt, ...) do {				\

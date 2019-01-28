@@ -195,8 +195,6 @@ typedef enum spa_config_source {
 	SPA_CONFIG_SRC_MOS		/* MOS, but not always from right txg */
 } spa_config_source_t;
 
-typedef struct spa_trimstats spa_trimstats_t;
-
 struct spa {
 	/*
 	 * Fields protected by spa_namespace_lock.
@@ -380,20 +378,8 @@ struct spa {
 	uint64_t	spa_deadman_ziotime;	/* deadman zio expiration */
 	uint64_t	spa_all_vdev_zaps;	/* ZAP of per-vd ZAP obj #s */
 	spa_avz_action_t	spa_avz_action;	/* destroy/rebuild AVZ? */
-
-	/* TRIM */
 	uint64_t	spa_force_trim;		/* force sending trim? */
 	uint64_t	spa_auto_trim;		/* see spa_auto_trim_t */
-
-	kmutex_t	spa_auto_trim_lock;
-	kcondvar_t	spa_auto_trim_done_cv;	/* all autotrim thrd's exited */
-	uint64_t	spa_num_auto_trimming;	/* # of autotrim threads */
-	taskq_t		*spa_auto_trim_taskq;
-
-	/* TRIM/UNMAP kstats */
-	spa_trimstats_t	*spa_trimstats;		/* alloc'd by kstat_create */
-	kstat_t		*spa_trimstats_ks;
-
 	uint64_t	spa_errata;		/* errata issues detected */
 	spa_stats_t	spa_stats;		/* assorted spa statistics */
 	spa_keystore_t	spa_keystore;		/* loaded crypto keys */
@@ -431,11 +417,6 @@ extern void spa_load_l2cache(spa_t *spa);
 extern sysevent_t *spa_event_create(spa_t *spa, vdev_t *vd, nvlist_t *hist_nvl,
     const char *name);
 extern void spa_event_post(sysevent_t *ev);
-
-extern void spa_auto_trim_taskq_create(spa_t *spa);
-extern void spa_man_trim_taskq_create(spa_t *spa);
-extern void spa_auto_trim_taskq_destroy(spa_t *spa);
-extern void spa_man_trim_taskq_destroy(spa_t *spa);
 
 #ifdef	__cplusplus
 }
