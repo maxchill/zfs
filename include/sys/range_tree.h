@@ -25,6 +25,7 @@
 
 /*
  * Copyright (c) 2013, 2017 by Delphix. All rights reserved.
+ * Copyright 2017 Nexenta Systems, Inc. All rights reserved.
  */
 
 #ifndef _SYS_RANGE_TREE_H
@@ -94,6 +95,9 @@ void range_tree_verify_not_present(range_tree_t *rt,
 range_seg_t *range_tree_find(range_tree_t *rt, uint64_t start, uint64_t size);
 void range_tree_resize_segment(range_tree_t *rt, range_seg_t *rs,
     uint64_t newstart, uint64_t newsize);
+boolean_t range_tree_contains_part(range_tree_t *rt, uint64_t start,
+    uint64_t size);
+uint64_t range_tree_find_gap(range_tree_t *rt, uint64_t start, uint64_t size);
 uint64_t range_tree_space(range_tree_t *rt);
 boolean_t range_tree_is_empty(range_tree_t *rt);
 void range_tree_swap(range_tree_t **rtsrc, range_tree_t **rtdst);
