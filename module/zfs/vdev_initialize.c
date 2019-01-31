@@ -87,12 +87,11 @@ vdev_initialize_zap_update_sync(void *arg, dmu_tx_t *tx)
 
 	objset_t *mos = vd->vdev_spa->spa_meta_objset;
 
-	if (last_offset > 0) {
-		vd->vdev_initialize_last_offset = last_offset;
-		VERIFY0(zap_update(mos, vd->vdev_leaf_zap,
-		    VDEV_LEAF_ZAP_INITIALIZE_LAST_OFFSET,
-		    sizeof (last_offset), 1, &last_offset, tx));
-	}
+	vd->vdev_initialize_last_offset = last_offset;
+	VERIFY0(zap_update(mos, vd->vdev_leaf_zap,
+	    VDEV_LEAF_ZAP_INITIALIZE_LAST_OFFSET,
+	    sizeof (last_offset), 1, &last_offset, tx));
+
 	if (vd->vdev_initialize_action_time > 0) {
 		uint64_t val = (uint64_t)vd->vdev_initialize_action_time;
 		VERIFY0(zap_update(mos, vd->vdev_leaf_zap,
@@ -127,6 +126,18 @@ vdev_initialize_change_state(vdev_t *vd, vdev_initializing_state_t new_state)
 	if (vd->vdev_initialize_state != VDEV_INITIALIZE_SUSPENDED) {
 		vd->vdev_initialize_action_time = gethrestime_sec();
 	}
+
+	/*
+	 * If we're activating after a previous completion update the
+	 * offset in order to start initializing the entire device.
+	 */
+	if (new_state == VDEV_INITIALIZE_ACTIVE &&
+	    vd->vdev_initialize_state == VDEV_INITIALIZE_COMPLETE) {
+		for (int i = 0; i < TXG_SIZE; i++)
+			vd->vdev_initialize_offset[i] = 0;
+	}
+
+	boolean_t resumed = !!(vd->vdev_trim_state == VDEV_TRIM_SUSPENDED);
 	vd->vdev_initialize_state = new_state;
 
 	dmu_tx_t *tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
@@ -136,18 +147,23 @@ vdev_initialize_change_state(vdev_t *vd, vdev_initializing_state_t new_state)
 
 	switch (new_state) {
 	case VDEV_INITIALIZE_ACTIVE:
+		spa_event_notify(spa, vd, NULL, resumed ?
+		    ESC_ZFS_INITIALIZE_RESUME : ESC_ZFS_INITIALIZE_START);
 		spa_history_log_internal(spa, "initialize", tx,
 		    "vdev=%s activated", vd->vdev_path);
 		break;
 	case VDEV_INITIALIZE_SUSPENDED:
+		spa_event_notify(spa, vd, NULL, ESC_ZFS_INITIALIZE_SUSPEND);
 		spa_history_log_internal(spa, "initialize", tx,
 		    "vdev=%s suspended", vd->vdev_path);
 		break;
 	case VDEV_INITIALIZE_CANCELED:
+		spa_event_notify(spa, vd, NULL, ESC_ZFS_INITIALIZE_CANCEL);
 		spa_history_log_internal(spa, "initialize", tx,
 		    "vdev=%s canceled", vd->vdev_path);
 		break;
 	case VDEV_INITIALIZE_COMPLETE:
+		spa_event_notify(spa, vd, NULL, ESC_ZFS_INITIALIZE_FINISH);
 		spa_history_log_internal(spa, "initialize", tx,
 		    "vdev=%s complete", vd->vdev_path);
 		break;
