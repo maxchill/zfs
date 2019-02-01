@@ -378,8 +378,8 @@ struct spa {
 	uint64_t	spa_deadman_ziotime;	/* deadman zio expiration */
 	uint64_t	spa_all_vdev_zaps;	/* ZAP of per-vd ZAP obj #s */
 	spa_avz_action_t	spa_avz_action;	/* destroy/rebuild AVZ? */
-	uint64_t	spa_force_trim;		/* force sending trim? */
-	uint64_t	spa_auto_trim;		/* see spa_auto_trim_t */
+	uint64_t	spa_forcetrim;		/* force sending trim? */
+	uint64_t	spa_autotrim;		/* asynchronously trim? */
 	uint64_t	spa_errata;		/* errata issues detected */
 	spa_stats_t	spa_stats;		/* assorted spa statistics */
 	spa_keystore_t	spa_keystore;		/* loaded crypto keys */

@@ -921,7 +921,7 @@ vdev_trim_restart(vdev_t *vd)
  * is created for each leaf vdev, instead of each top-level vdev.
  */
 static void
-vdev_auto_trim_thread(void *arg)
+vdev_autotrim_thread(void *arg)
 {
 	vdev_t *vd = arg;
 	spa_t *spa = vd->vdev_spa;
@@ -1029,7 +1029,7 @@ vdev_auto_trim_thread(void *arg)
 	 * abandon any unprocessed auto-trim ranges in order to reclaim the
 	 * memory required to track the ranged to be trimmed.
 	 */
-	if (spa_get_auto_trim(spa) == SPA_AUTO_TRIM_OFF) {
+	if (spa_get_autotrim(spa) == SPA_AUTOTRIM_OFF) {
 		for (uint64_t i = 0; i < vd->vdev_ms_count; i++) {
 			metaslab_t *msp = vd->vdev_ms[i];
 
@@ -1058,7 +1058,7 @@ vdev_auto_trim_thread(void *arg)
 }
 
 void
-vdev_auto_trim(spa_t *spa)
+vdev_autotrim(spa_t *spa)
 {
 	vdev_t *root_vd = spa->spa_root_vdev;
 
@@ -1071,7 +1071,7 @@ vdev_auto_trim(spa_t *spa)
 			ASSERT3P(tvd->vdev_top, ==, tvd);
 
 			tvd->vdev_trim_thread = thread_create(NULL, 0,
-			    vdev_auto_trim_thread, tvd, 0, &p0, TS_RUN,
+			    vdev_autotrim_thread, tvd, 0, &p0, TS_RUN,
 			    maxclsyspri);
 		}
 		mutex_exit(&tvd->vdev_trim_lock);
@@ -1079,7 +1079,7 @@ vdev_auto_trim(spa_t *spa)
 }
 
 void
-vdev_auto_trim_stop(spa_t *spa)
+vdev_autotrim_stop(spa_t *spa)
 {
 	vdev_t *root_vd = spa->spa_root_vdev;
 
@@ -1096,12 +1096,12 @@ vdev_auto_trim_stop(spa_t *spa)
 }
 
 void
-vdev_auto_trim_restart(spa_t *spa)
+vdev_autotrim_restart(spa_t *spa)
 {
-	if (spa->spa_auto_trim)
-		vdev_auto_trim(spa);
+	if (spa->spa_autotrim)
+		vdev_autotrim(spa);
 	else
-		vdev_auto_trim_stop(spa);
+		vdev_autotrim_stop(spa);
 }
 
 /*
@@ -1170,9 +1170,9 @@ EXPORT_SYMBOL(vdev_trim_stop);
 EXPORT_SYMBOL(vdev_trim_stop_all);
 EXPORT_SYMBOL(vdev_trim_stop_wait);
 EXPORT_SYMBOL(vdev_trim_restart);
-EXPORT_SYMBOL(vdev_auto_trim);
-EXPORT_SYMBOL(vdev_auto_trim_stop);
-EXPORT_SYMBOL(vdev_auto_trim_restart);
+EXPORT_SYMBOL(vdev_autotrim);
+EXPORT_SYMBOL(vdev_autotrim_stop);
+EXPORT_SYMBOL(vdev_autotrim_restart);
 
 /* XXX- Decide which module options to make available */
 module_param(zfs_trim_enabled, int, 0644);

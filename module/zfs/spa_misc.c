@@ -1924,16 +1924,16 @@ spa_deadman_synctime(spa_t *spa)
 	return (spa->spa_deadman_synctime);
 }
 
-spa_force_trim_t
-spa_get_force_trim(spa_t *spa)
+spa_forcetrim_t
+spa_get_forcetrim(spa_t *spa)
 {
-	return (spa->spa_force_trim);
+	return (spa->spa_forcetrim);
 }
 
-spa_auto_trim_t
-spa_get_auto_trim(spa_t *spa)
+spa_autotrim_t
+spa_get_autotrim(spa_t *spa)
 {
-	return (spa->spa_auto_trim);
+	return (spa->spa_autotrim);
 }
 
 uint64_t

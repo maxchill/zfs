@@ -955,9 +955,9 @@ vdev_disk_io_start(zio_t *zio)
 			 * on a top-level vdev, whereas vdev_disk_io_start
 			 * is guaranteed to be operating a leaf disk vdev.
 			 */
+			spa_t *spa = v->vdev_spa;
 			if (v->vdev_notrim &&
-			    spa_get_force_trim(v->vdev_spa) !=
-			    SPA_FORCE_TRIM_ON) {
+			    spa_get_forcetrim(spa) != SPA_FORCETRIM_ON) {
 				zio->io_error = SET_ERROR(ENOTSUP);
 				break;
 			}

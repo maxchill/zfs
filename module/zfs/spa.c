@@ -1448,7 +1448,7 @@ spa_unload(spa_t *spa)
 		vdev_t *root_vdev = spa->spa_root_vdev;
 		vdev_initialize_stop_all(root_vdev, VDEV_INITIALIZE_ACTIVE);
 		vdev_trim_stop_all(root_vdev, VDEV_TRIM_ACTIVE);
-		vdev_auto_trim_stop(spa);
+		vdev_autotrim_stop(spa);
 	}
 
 	/*
@@ -3509,8 +3509,8 @@ spa_ld_get_props(spa_t *spa)
 		spa_prop_find(spa, ZPOOL_PROP_MULTIHOST, &spa->spa_multihost);
 		spa_prop_find(spa, ZPOOL_PROP_DEDUPDITTO,
 		    &spa->spa_dedup_ditto);
-		spa_prop_find(spa, ZPOOL_PROP_FORCETRIM, &spa->spa_force_trim);
-		spa_prop_find(spa, ZPOOL_PROP_AUTOTRIM, &spa->spa_auto_trim);
+		spa_prop_find(spa, ZPOOL_PROP_FORCETRIM, &spa->spa_forcetrim);
+		spa_prop_find(spa, ZPOOL_PROP_AUTOTRIM, &spa->spa_autotrim);
 		spa->spa_autoreplace = (autoreplace != 0);
 	}
 
@@ -4262,7 +4262,7 @@ spa_load_impl(spa_t *spa, spa_import_type_t type, char **ereport)
 		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
 		vdev_initialize_restart(spa->spa_root_vdev);
 		vdev_trim_restart(spa->spa_root_vdev);
-		vdev_auto_trim_restart(spa);
+		vdev_autotrim_restart(spa);
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
 	}
 
@@ -5265,8 +5265,8 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 	spa->spa_failmode = zpool_prop_default_numeric(ZPOOL_PROP_FAILUREMODE);
 	spa->spa_autoexpand = zpool_prop_default_numeric(ZPOOL_PROP_AUTOEXPAND);
 	spa->spa_multihost = zpool_prop_default_numeric(ZPOOL_PROP_MULTIHOST);
-	spa->spa_force_trim = zpool_prop_default_numeric(ZPOOL_PROP_FORCETRIM);
-	spa->spa_auto_trim = zpool_prop_default_numeric(ZPOOL_PROP_AUTOTRIM);
+	spa->spa_forcetrim = zpool_prop_default_numeric(ZPOOL_PROP_FORCETRIM);
+	spa->spa_autotrim = zpool_prop_default_numeric(ZPOOL_PROP_AUTOTRIM);
 
 	if (props != NULL) {
 		spa_configfile_set(spa, props, B_FALSE);
@@ -7344,7 +7344,7 @@ spa_async_thread(void *arg)
 
 	if (tasks & SPA_ASYNC_AUTOTRIM) {
 		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
-		vdev_auto_trim_restart(spa);
+		vdev_autotrim_restart(spa);
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
 	}
 
@@ -7848,10 +7848,10 @@ spa_sync_props(void *arg, dmu_tx_t *tx)
 				spa->spa_failmode = intval;
 				break;
 			case ZPOOL_PROP_FORCETRIM:
-				spa->spa_force_trim = intval;
+				spa->spa_forcetrim = intval;
 				break;
 			case ZPOOL_PROP_AUTOTRIM:
-				spa->spa_auto_trim = intval;
+				spa->spa_autotrim = intval;
 				spa_async_request(spa, SPA_ASYNC_AUTOTRIM);
 				break;
 			case ZPOOL_PROP_AUTOEXPAND:

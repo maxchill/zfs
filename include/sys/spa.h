@@ -744,9 +744,9 @@ typedef enum spa_import_type {
  *	ON: yes, force send to everybody
  */
 typedef enum {
-	SPA_FORCE_TRIM_OFF = 0,	/* default */
-	SPA_FORCE_TRIM_ON
-} spa_force_trim_t;
+	SPA_FORCETRIM_OFF = 0,	/* default */
+	SPA_FORCETRIM_ON
+} spa_forcetrim_t;
 
 /*
  * Send TRIM commands in-line during normal pool operation while deleting.
@@ -754,9 +754,9 @@ typedef enum {
  *	ON: yes
  */
 typedef enum {
-	SPA_AUTO_TRIM_OFF = 0,	/* default */
-	SPA_AUTO_TRIM_ON
-} spa_auto_trim_t;
+	SPA_AUTOTRIM_OFF = 0,	/* default */
+	SPA_AUTOTRIM_ON
+} spa_autotrim_t;
 
 /* state manipulation functions */
 extern int spa_open(const char *pool, spa_t **, void *tag);
@@ -1047,8 +1047,8 @@ extern objset_t *spa_meta_objset(spa_t *spa);
 extern uint64_t spa_deadman_synctime(spa_t *spa);
 extern uint64_t spa_deadman_ziotime(spa_t *spa);
 extern uint64_t spa_dirty_data(spa_t *spa);
-extern spa_force_trim_t spa_get_force_trim(spa_t *spa);
-extern spa_auto_trim_t spa_get_auto_trim(spa_t *spa);
+extern spa_forcetrim_t spa_get_forcetrim(spa_t *spa);
+extern spa_autotrim_t spa_get_autotrim(spa_t *spa);
 
 /* Miscellaneous support routines */
 extern void spa_load_failed(spa_t *spa, const char *fmt, ...);

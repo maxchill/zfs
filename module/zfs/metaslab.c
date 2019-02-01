@@ -2682,7 +2682,7 @@ metaslab_sync_done(metaslab_t *msp, uint64_t txg)
 	 * If auto-trim is enabled then frees from the defer_tree and
 	 * ms_freed tree should be added to the trim set to be processed.
 	 */
-	if (spa_get_auto_trim(spa) == SPA_AUTO_TRIM_ON) {
+	if (spa_get_autotrim(spa) == SPA_AUTOTRIM_ON) {
 		range_tree_walk(*defer_tree, range_tree_add, msp->ms_trim);
 		if (!defer_allowed) {
 			range_tree_walk(msp->ms_freed, range_tree_add,
@@ -3876,7 +3876,7 @@ metaslab_unalloc_dva(spa_t *spa, const dva_t *dva, uint64_t txg)
 
 	range_tree_add(msp->ms_allocatable, offset, size);
 
-	if (spa_get_auto_trim(spa) == SPA_AUTO_TRIM_ON)
+	if (spa_get_autotrim(spa) == SPA_AUTOTRIM_ON)
 		range_tree_add(msp->ms_trim, offset, size);
 
 	mutex_exit(&msp->ms_lock);

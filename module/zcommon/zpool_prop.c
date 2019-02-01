@@ -131,10 +131,10 @@ zpool_prop_init(void)
 	    ZIO_FAILURE_MODE_WAIT, PROP_DEFAULT, ZFS_TYPE_POOL,
 	    "wait | continue | panic", "FAILMODE", failuremode_table);
 	zprop_register_index(ZPOOL_PROP_FORCETRIM, "forcetrim",
-	    SPA_FORCE_TRIM_OFF, PROP_DEFAULT, ZFS_TYPE_POOL,
+	    SPA_FORCETRIM_OFF, PROP_DEFAULT, ZFS_TYPE_POOL,
 	    "on | off", "FORCETRIM", boolean_table);
 	zprop_register_index(ZPOOL_PROP_AUTOTRIM, "autotrim",
-	    SPA_AUTO_TRIM_OFF, PROP_DEFAULT, ZFS_TYPE_POOL,
+	    SPA_AUTOTRIM_OFF, PROP_DEFAULT, ZFS_TYPE_POOL,
 	    "on | off", "AUTOTRIM", boolean_table);
 
 	/* hidden properties */
