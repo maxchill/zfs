@@ -555,7 +555,6 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 		case ZPOOL_PROP_AUTOREPLACE:
 		case ZPOOL_PROP_LISTSNAPS:
 		case ZPOOL_PROP_AUTOEXPAND:
-		case ZPOOL_PROP_FORCETRIM:
 		case ZPOOL_PROP_AUTOTRIM:
 			error = nvpair_value_uint64(elem, &intval);
 			if (!error && intval > 1)
@@ -3509,7 +3508,6 @@ spa_ld_get_props(spa_t *spa)
 		spa_prop_find(spa, ZPOOL_PROP_MULTIHOST, &spa->spa_multihost);
 		spa_prop_find(spa, ZPOOL_PROP_DEDUPDITTO,
 		    &spa->spa_dedup_ditto);
-		spa_prop_find(spa, ZPOOL_PROP_FORCETRIM, &spa->spa_forcetrim);
 		spa_prop_find(spa, ZPOOL_PROP_AUTOTRIM, &spa->spa_autotrim);
 		spa->spa_autoreplace = (autoreplace != 0);
 	}
@@ -5265,7 +5263,6 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 	spa->spa_failmode = zpool_prop_default_numeric(ZPOOL_PROP_FAILUREMODE);
 	spa->spa_autoexpand = zpool_prop_default_numeric(ZPOOL_PROP_AUTOEXPAND);
 	spa->spa_multihost = zpool_prop_default_numeric(ZPOOL_PROP_MULTIHOST);
-	spa->spa_forcetrim = zpool_prop_default_numeric(ZPOOL_PROP_FORCETRIM);
 	spa->spa_autotrim = zpool_prop_default_numeric(ZPOOL_PROP_AUTOTRIM);
 
 	if (props != NULL) {
@@ -6520,6 +6517,9 @@ spa_vdev_trim_impl(spa_t *spa, uint64_t guid, uint64_t cmd_type,
 	} else if (!vdev_writeable(vd)) {
 		spa_config_exit(spa, SCL_CONFIG | SCL_STATE, FTAG);
 		return (SET_ERROR(EROFS));
+	} else if (!vd->vdev_notrim) {
+		spa_config_exit(spa, SCL_CONFIG | SCL_STATE, FTAG);
+		return (SET_ERROR(EOPNOTSUPP));
 	}
 	mutex_enter(&vd->vdev_trim_lock);
 	spa_config_exit(spa, SCL_CONFIG | SCL_STATE, FTAG);
@@ -7846,9 +7846,6 @@ spa_sync_props(void *arg, dmu_tx_t *tx)
 				break;
 			case ZPOOL_PROP_FAILUREMODE:
 				spa->spa_failmode = intval;
-				break;
-			case ZPOOL_PROP_FORCETRIM:
-				spa->spa_forcetrim = intval;
 				break;
 			case ZPOOL_PROP_AUTOTRIM:
 				spa->spa_autotrim = intval;

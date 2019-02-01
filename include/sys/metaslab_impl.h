@@ -25,7 +25,6 @@
 
 /*
  * Copyright (c) 2011, 2018 by Delphix. All rights reserved.
- * Copyright 2016 Nexenta Systems, Inc. All rights reserved.
  */
 
 #ifndef _SYS_METASLAB_IMPL_H

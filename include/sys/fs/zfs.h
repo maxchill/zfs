@@ -22,7 +22,7 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2011, 2018 by Delphix. All rights reserved.
- * Copyright 2017 Nexenta Systems, Inc.  All rights reserved.
+ * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
  * Copyright (c) 2013, 2017 Joyent, Inc. All rights reserved.
  * Copyright (c) 2014 Integros [integros.com]
  * Copyright (c) 2017 Datto Inc.
@@ -243,7 +243,6 @@ typedef enum {
 	ZPOOL_PROP_MULTIHOST,
 	ZPOOL_PROP_CHECKPOINT,
 	ZPOOL_PROP_LOAD_GUID,
-	ZPOOL_PROP_FORCETRIM,
 	ZPOOL_PROP_AUTOTRIM,
 	ZPOOL_NUM_PROPS
 } zpool_prop_t;
@@ -937,6 +936,7 @@ typedef enum zio_type {
 	ZIO_TYPE_FREE,
 	ZIO_TYPE_CLAIM,
 	ZIO_TYPE_IOCTL,
+	ZIO_TYPE_TRIM,
 	ZIO_TYPES
 } zio_type_t;
 
@@ -1020,6 +1020,7 @@ typedef struct vdev_stat {
 	uint64_t	vs_write_errors;	/* write errors		*/
 	uint64_t	vs_checksum_errors;	/* checksum errors	*/
 	uint64_t	vs_initialize_errors;	/* initializing errors	*/
+	uint64_t	vs_trim_errors;		/* trimming errors	*/
 	uint64_t	vs_self_healed;		/* self-healed bytes	*/
 	uint64_t	vs_scan_removing;	/* removing?	*/
 	uint64_t	vs_scan_processed;	/* scan processed bytes	*/
@@ -1031,7 +1032,7 @@ typedef struct vdev_stat {
 	uint64_t	vs_checkpoint_space;    /* checkpoint-consumed space */
 	uint64_t	vs_resilver_deferred;	/* resilver deferred	*/
 	uint64_t	vs_slow_ios;		/* slow IOs */
-	uint64_t	vs_trim_errors;		/* trimming errors	*/
+	uint64_t	vs_trim_notsup;		/* supported by device */
 	uint64_t	vs_trim_bytes_done;	/* bytes trimmed */
 	uint64_t	vs_trim_bytes_est;	/* total bytes to trim */
 	uint64_t	vs_trim_state;		/* vdev_trim_state_t */
@@ -1111,21 +1112,6 @@ typedef enum pool_trim_func {
 } pool_trim_func_t;
 
 /*
- * Discard stats
- *
- * Aggregate statistics for all discards issued as part of a zio TRIM.
- * They are merged with standard and extended stats when the zio is done.
- */
-typedef struct vdev_stat_trim {
-	uint64_t	vsd_ops;
-	uint64_t	vsd_bytes;
-	uint64_t	vsd_ind_histo[VDEV_RQ_HISTO_BUCKETS];
-	uint64_t	vsd_queue_histo[VDEV_L_HISTO_BUCKETS];
-	uint64_t	vsd_disk_histo[VDEV_L_HISTO_BUCKETS];
-	uint64_t	vsd_total_histo[VDEV_L_HISTO_BUCKETS];
-} vdev_stat_trim_t;
-
-/*
  * DDT statistics.  Note: all fields should be 64-bit because this
  * is passed between kernel and userland as an nvlist uint64 array.
  */
@@ -1182,7 +1168,7 @@ typedef enum {
 	VDEV_TRIM_ACTIVE,
 	VDEV_TRIM_CANCELED,
 	VDEV_TRIM_SUSPENDED,
-	VDEV_TRIM_COMPLETE
+	VDEV_TRIM_COMPLETE,
 } vdev_trim_state_t;
 
 /*

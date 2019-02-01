@@ -25,7 +25,6 @@
  * Copyright (c) 2011, 2018 by Delphix. All rights reserved.
  * Copyright 2016 Igor Kozhukhov <ikozhukhov@gmail.com>
  * Copyright (c) 2017 Datto Inc.
- * Copyright 2017 Nexenta Systems, Inc. All rights reserved.
  */
 
 /*
@@ -295,6 +294,9 @@ libzfs_error_description(libzfs_handle_t *hdl)
 		return (dgettext(TEXT_DOMAIN, "currently trimming"));
 	case EZFS_NO_TRIM:
 		return (dgettext(TEXT_DOMAIN, "there is no active trim"));
+	case EZFS_TRIM_NOTSUP:
+		return (dgettext(TEXT_DOMAIN, "trim operations are not "
+		    "supported by this device"));
 	case EZFS_UNKNOWN:
 		return (dgettext(TEXT_DOMAIN, "unknown error"));
 	default:

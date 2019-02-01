@@ -14,7 +14,6 @@
  */
 /*
  * Copyright (c) 2014, 2016 by Delphix. All rights reserved.
- * Copyright 2017 Nexenta Systems, Inc. All rights reserved.
  */
 #ifndef	_ZIO_PRIORITY_H
 #define	_ZIO_PRIORITY_H

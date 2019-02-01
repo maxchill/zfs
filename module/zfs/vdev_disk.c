@@ -38,7 +38,6 @@
 #include <linux/mod_compat.h>
 #include <linux/msdos_fs.h>
 #include <linux/vfs_compat.h>
-#include <sys/dkioc_free_util.h>
 
 char *zfs_vdev_scheduler = VDEV_SCHEDULER;
 static void *zfs_vdev_holder = VDEV_HOLDER;
@@ -738,151 +737,6 @@ vdev_disk_io_flush(struct block_device *bdev, zio_t *zio)
 	return (0);
 }
 
-static int
-vdev_disk_io_discard_sync(struct block_device *bdev, zio_t *zio)
-{
-	dkioc_free_list_t *dfl = zio->io_dfl;
-
-	zio->io_dfl_stats = kmem_zalloc(sizeof (vdev_stat_trim_t), KM_SLEEP);
-
-	for (int i = 0; i < dfl->dfl_num_exts; i++) {
-		int error;
-
-		if (dfl->dfl_exts[i].dfle_length == 0)
-			continue;
-
-		error = -blkdev_issue_discard(bdev,
-		    (dfl->dfl_exts[i].dfle_start + dfl->dfl_offset) >> 9,
-		    dfl->dfl_exts[i].dfle_length >> 9, GFP_NOFS, 0);
-		if (error != 0) {
-			return (SET_ERROR(error));
-		} else {
-			vdev_trim_stat_update(zio,
-			    dfl->dfl_exts[i].dfle_length, TRIM_STAT_ALL);
-		}
-	}
-
-	return (0);
-}
-
-BIO_END_IO_PROTO(vdev_disk_io_discard_completion, bio, error)
-{
-	dio_request_t *dr = bio->bi_private;
-	zio_t *zio = dr->dr_zio;
-
-	if (dr->dr_error == 0) {
-#ifdef HAVE_1ARG_BIO_END_IO_T
-		dr->dr_error = BIO_END_IO_ERROR(bio);
-#else
-		if (error)
-			dr->dr_error = -(error);
-		else if (!test_bit(BIO_UPTODATE, &bio->bi_flags))
-			dr->dr_error = EIO;
-#endif
-	}
-
-	/*
-	 * Only the latency is updated at completion.  The ops and request
-	 * size must be update when submitted since the size is no longer
-	 * available as part of the bio.
-	 */
-	vdev_trim_stat_update(zio, 0, TRIM_STAT_L_HISTO);
-
-	/* Drop reference acquired by vdev_disk_io_discard() */
-	(void) vdev_disk_dio_put(dr);
-}
-
-/*
- * zio->io_dfl contains a dkioc_free_list_t specifying which offsets are to
- * be freed.  Individual bio requests are constructed for each discard and
- * submitted to the block layer to be handled asynchronously.  Any range
- * with a length of zero or a length larger than UINT_MAX are ignored.
- */
-static int
-vdev_disk_io_discard(struct block_device *bdev, zio_t *zio)
-{
-	dio_request_t *dr;
-	dkioc_free_list_t *dfl = zio->io_dfl;
-	unsigned int max_discard_sectors;
-	unsigned int alignment, granularity;
-	struct request_queue *q;
-#if defined(HAVE_BLK_QUEUE_HAVE_BLK_PLUG)
-	struct blk_plug plug;
-#endif
-
-	q = bdev_get_queue(bdev);
-	if (!q)
-		return (SET_ERROR(ENXIO));
-
-	if (!blk_queue_discard(q))
-		return (SET_ERROR(ENOTSUP));
-
-	zio->io_dfl_stats = kmem_zalloc(sizeof (vdev_stat_trim_t), KM_SLEEP);
-	dr = vdev_disk_dio_alloc(0);
-	dr->dr_zio = zio;
-
-	granularity = MAX(q->limits.discard_granularity >> 9, 1U);
-	alignment = (bdev_discard_alignment(bdev) >> 9) % granularity;
-
-	max_discard_sectors = MIN(q->limits.max_discard_sectors, UINT_MAX >> 9);
-	max_discard_sectors -= max_discard_sectors % granularity;
-
-	/* Extra reference to protect dio_request during vdev_submit_bio */
-	vdev_disk_dio_get(dr);
-	vdev_disk_dio_blk_start_plug(dr, &plug);
-
-	for (int i = 0; i < dfl->dfl_num_exts; i++) {
-		uint64_t nr_sectors = dfl->dfl_exts[i].dfle_length >> 9;
-		uint64_t sector = (dfl->dfl_exts[i].dfle_start +
-		    dfl->dfl_offset) >> 9;
-		struct bio *bio;
-		unsigned int request_sectors;
-		sector_t end_sector;
-
-		while (nr_sectors > 0) {
-			bio = bio_alloc(GFP_NOIO, 1);
-			if (unlikely(bio == NULL))
-				break;
-
-			request_sectors = min_t(sector_t, nr_sectors,
-			    max_discard_sectors);
-
-			/* When splitting requests align the end of each. */
-			end_sector = sector + request_sectors;
-			if (request_sectors < nr_sectors &&
-			    (end_sector % granularity) != alignment) {
-				end_sector = ((end_sector - alignment) /
-				    granularity) * granularity + alignment;
-				request_sectors = end_sector - sector;
-			}
-
-			bio_set_dev(bio, bdev);
-			bio->bi_end_io = vdev_disk_io_discard_completion;
-			bio->bi_private = dr;
-			bio_set_discard(bio);
-			BIO_BI_SECTOR(bio) = sector;
-			BIO_BI_SIZE(bio) = request_sectors << 9;
-
-			nr_sectors -= request_sectors;
-			sector = end_sector;
-
-			vdev_trim_stat_update(zio, BIO_BI_SIZE(bio),
-			    TRIM_STAT_OP | TRIM_STAT_RQ_HISTO);
-
-			/* Matching put in vdev_disk_discard_completion */
-			vdev_disk_dio_get(dr);
-			vdev_submit_bio(bio);
-
-			cond_resched();
-		}
-	}
-
-	vdev_disk_dio_blk_finish_plug(dr, &plug);
-	(void) vdev_disk_dio_put(dr);
-
-	return (0);
-}
-
 static void
 vdev_disk_io_start(zio_t *zio)
 {
@@ -943,38 +797,6 @@ vdev_disk_io_start(zio_t *zio)
 			zio->io_error = error;
 
 			break;
-
-		case DKIOCFREE:
-
-			if (!zfs_trim_enabled)
-				break;
-
-			/*
-			 * We perform device support checks here instead of
-			 * in zio_trim_*(), as zio_trim_*() might be invoked
-			 * on a top-level vdev, whereas vdev_disk_io_start
-			 * is guaranteed to be operating a leaf disk vdev.
-			 */
-			spa_t *spa = v->vdev_spa;
-			if (v->vdev_notrim &&
-			    spa_get_forcetrim(spa) != SPA_FORCETRIM_ON) {
-				zio->io_error = SET_ERROR(ENOTSUP);
-				break;
-			}
-
-			if (zfs_trim_sync) {
-				error = vdev_disk_io_discard_sync(vd->vd_bdev,
-				    zio);
-			} else {
-				error = vdev_disk_io_discard(vd->vd_bdev, zio);
-				if (error == 0)
-					return;
-			}
-
-			zio->io_error = error;
-
-			break;
-
 		default:
 			zio->io_error = SET_ERROR(ENOTSUP);
 		}
@@ -1003,6 +825,13 @@ vdev_disk_io_start(zio_t *zio)
 		flags = 0;
 #endif
 		break;
+
+	case ZIO_TYPE_TRIM:
+		zio->io_error = -blkdev_issue_discard(vd->vd_bdev,
+		    zio->io_offset >> 9, zio->io_size >> 9, GFP_NOFS, 0);
+		rw_exit(&vd->vd_lock);
+		zio_interrupt(zio);
+		return;
 
 	default:
 		rw_exit(&vd->vd_lock);
@@ -1104,16 +933,19 @@ param_set_vdev_scheduler(const char *val, zfs_kernel_param_t *kp)
 }
 
 vdev_ops_t vdev_disk_ops = {
-	.vdev_op_open =		vdev_disk_open,
-	.vdev_op_close =	vdev_disk_close,
-	.vdev_op_asize =	vdev_default_asize,
-	.vdev_op_io_start =	vdev_disk_io_start,
-	.vdev_op_io_done =	vdev_disk_io_done,
-	.vdev_op_hold =		vdev_disk_hold,
-	.vdev_op_rele =		vdev_disk_rele,
-	.vdev_op_xlate =	vdev_default_xlate,
-	.vdev_op_type =		VDEV_TYPE_DISK,	/* name of this vdev type */
-	.vdev_op_leaf =		B_TRUE		/* leaf vdev */
+	vdev_disk_open,
+	vdev_disk_close,
+	vdev_default_asize,
+	vdev_disk_io_start,
+	vdev_disk_io_done,
+	NULL,
+	NULL,
+	vdev_disk_hold,
+	vdev_disk_rele,
+	NULL,
+	vdev_default_xlate,
+	VDEV_TYPE_DISK,		/* name of this vdev type */
+	B_TRUE			/* leaf vdev */
 };
 
 module_param_call(zfs_vdev_scheduler, param_set_vdev_scheduler,

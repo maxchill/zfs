@@ -21,7 +21,7 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2011, 2018 by Delphix. All rights reserved.
- * Copyright 2017 Nexenta Systems, Inc.  All rights reserved.
+ * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
  * Copyright 2013 Saso Kiselkov. All rights reserved.
  * Copyright (c) 2014 Integros [integros.com]
@@ -739,16 +739,6 @@ typedef enum spa_import_type {
 } spa_import_type_t;
 
 /*
- * Force sending TRIM commands even to devices which claim to not support it.
- *	OFF: no, only send to devices which indicated support
- *	ON: yes, force send to everybody
- */
-typedef enum {
-	SPA_FORCETRIM_OFF = 0,	/* default */
-	SPA_FORCETRIM_ON
-} spa_forcetrim_t;
-
-/*
  * Send TRIM commands in-line during normal pool operation while deleting.
  *	OFF: no
  *	ON: yes
@@ -930,18 +920,20 @@ typedef struct txg_stat {
 	uint64_t		ndirty;
 } txg_stat_t;
 
-/* Assorted spa kstats */
+/* Assorted pool IO kstats */
 typedef struct spa_iostats {
 	kstat_named_t	trim_extents_written;
 	kstat_named_t	trim_bytes_written;
 	kstat_named_t	trim_extents_skipped;
 	kstat_named_t	trim_bytes_skipped;
-	kstat_named_t	trim_errors;
+	kstat_named_t	trim_extents_failed;
+	kstat_named_t	trim_bytes_failed;
 	kstat_named_t	autotrim_extents_written;
 	kstat_named_t	autotrim_bytes_written;
 	kstat_named_t	autotrim_extents_skipped;
 	kstat_named_t	autotrim_bytes_skipped;
-	kstat_named_t	autotrim_errors;
+	kstat_named_t	autotrim_extents_failed;
+	kstat_named_t	autotrim_bytes_failed;
 } spa_iostats_t;
 
 extern void spa_stats_init(spa_t *spa);
@@ -963,7 +955,8 @@ extern void spa_mmp_history_add(spa_t *spa, uint64_t txg, uint64_t timestamp,
     int error);
 extern void spa_iostats_trim_add(spa_t *spa, zio_priority_t priority,
     uint64_t extents_written, uint64_t bytes_written,
-    uint64_t extents_skipped, uint64_t bytes_skipped, uint64_t errors);
+    uint64_t extents_skipped, uint64_t bytes_skipped,
+    uint64_t extents_failed, uint64_t bytes_failed);
 
 /* Pool configuration locks */
 extern int spa_config_tryenter(spa_t *spa, int locks, void *tag, krw_t rw);
@@ -1047,7 +1040,6 @@ extern objset_t *spa_meta_objset(spa_t *spa);
 extern uint64_t spa_deadman_synctime(spa_t *spa);
 extern uint64_t spa_deadman_ziotime(spa_t *spa);
 extern uint64_t spa_dirty_data(spa_t *spa);
-extern spa_forcetrim_t spa_get_forcetrim(spa_t *spa);
 extern spa_autotrim_t spa_get_autotrim(spa_t *spa);
 
 /* Miscellaneous support routines */

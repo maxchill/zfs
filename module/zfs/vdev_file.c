@@ -36,7 +36,6 @@
 #include <sys/abd.h>
 #include <sys/fcntl.h>
 #include <sys/vnode.h>
-#include <sys/dkioc_free_util.h>
 
 /*
  * Virtual device vector for files.
@@ -155,27 +154,42 @@ static void
 vdev_file_io_strategy(void *arg)
 {
 	zio_t *zio = (zio_t *)arg;
-	vdev_t *vd = zio->io_vd;
-	vdev_file_t *vf = vd->vdev_tsd;
-	ssize_t resid;
-	void *buf;
+	vdev_file_t *vf = zio->io_vd->vdev_tsd;
 
-	if (zio->io_type == ZIO_TYPE_READ)
-		buf = abd_borrow_buf(zio->io_abd, zio->io_size);
-	else
-		buf = abd_borrow_buf_copy(zio->io_abd, zio->io_size);
+	if (zio->io_type == ZIO_TYPE_TRIM) {
+		struct flock flck;
 
-	zio->io_error = vn_rdwr(zio->io_type == ZIO_TYPE_READ ?
-	    UIO_READ : UIO_WRITE, vf->vf_vnode, buf, zio->io_size,
-	    zio->io_offset, UIO_SYSSPACE, 0, RLIM64_INFINITY, kcred, &resid);
+		ASSERT3U(zio->io_size, !=, 0);
+		bzero(&flck, sizeof (flck));
+		flck.l_type = F_FREESP;
+		flck.l_start = zio->io_offset;
+		flck.l_len = zio->io_size;
+		flck.l_whence = 0;
 
-	if (zio->io_type == ZIO_TYPE_READ)
+		zio->io_error = VOP_SPACE(vf->vf_vnode, F_FREESP, &flck,
+		    0, 0, kcred, NULL);
+	} else if (zio->io_type == ZIO_TYPE_READ) {
+		void *buf = abd_borrow_buf(zio->io_abd, zio->io_size);
+		ssize_t resid;
+
+		zio->io_error = vn_rdwr(UIO_READ, vf->vf_vnode, buf,
+		    zio->io_size, zio->io_offset, UIO_SYSSPACE, 0,
+		    RLIM64_INFINITY, kcred, &resid);
+
 		abd_return_buf_copy(zio->io_abd, buf, zio->io_size);
-	else
+	} else if (zio->io_type == ZIO_TYPE_WRITE) {
+		void *buf = abd_borrow_buf_copy(zio->io_abd, zio->io_size);
+		ssize_t resid;
+
+		zio->io_error = vn_rdwr(UIO_WRITE, vf->vf_vnode, buf,
+		    zio->io_size, zio->io_offset, UIO_SYSSPACE, 0,
+		    RLIM64_INFINITY, kcred, &resid);
+
 		abd_return_buf(zio->io_abd, buf, zio->io_size);
 
-	if (resid != 0 && zio->io_error == 0)
-		zio->io_error = SET_ERROR(ENOSPC);
+		if (resid != 0 && zio->io_error == 0)
+			zio->io_error = SET_ERROR(ENOSPC);
+	}
 
 	zio_delay_interrupt(zio);
 }
@@ -229,43 +243,6 @@ vdev_file_io_start(zio_t *zio)
 			    kcred, NULL);
 			break;
 
-		case DKIOCFREE:
-		{
-			const dkioc_free_list_t *dfl = zio->io_dfl;
-
-			ASSERT(dfl != NULL);
-			if (!zfs_trim_enabled)
-				break;
-
-			zio->io_dfl_stats = kmem_zalloc(
-			    sizeof (vdev_stat_trim_t), KM_SLEEP);
-
-			for (int i = 0; i < dfl->dfl_num_exts; i++) {
-				struct flock flck;
-				int error;
-
-				if (dfl->dfl_exts[i].dfle_length == 0)
-					continue;
-
-				bzero(&flck, sizeof (flck));
-				flck.l_type = F_FREESP;
-				flck.l_start = dfl->dfl_exts[i].dfle_start +
-				    dfl->dfl_offset;
-				flck.l_len = dfl->dfl_exts[i].dfle_length;
-				flck.l_whence = 0;
-
-				error = VOP_SPACE(vf->vf_vnode,
-				    F_FREESP, &flck, 0, 0, kcred, NULL);
-				if (error != 0) {
-					zio->io_error = SET_ERROR(error);
-					break;
-				} else {
-					vdev_trim_stat_update(zio, flck.l_len,
-					    TRIM_STAT_ALL);
-				}
-			}
-			break;
-		}
 		default:
 			zio->io_error = SET_ERROR(ENOTSUP);
 		}
@@ -287,18 +264,19 @@ vdev_file_io_done(zio_t *zio)
 }
 
 vdev_ops_t vdev_file_ops = {
-	.vdev_op_open =		vdev_file_open,
-	.vdev_op_close =	vdev_file_close,
-	.vdev_op_asize =	vdev_default_asize,
-	.vdev_op_io_start =	vdev_file_io_start,
-	.vdev_op_io_done =	vdev_file_io_done,
-	.vdev_op_state_change =	NULL,
-	.vdev_op_need_resilver = NULL,
-	.vdev_op_hold =		vdev_file_hold,
-	.vdev_op_rele =		vdev_file_rele,
-	.vdev_op_xlate =	vdev_default_xlate,
-	.vdev_op_type =		VDEV_TYPE_FILE,	/* name of this vdev type */
-	.vdev_op_leaf =		B_TRUE		/* leaf vdev */
+	vdev_file_open,
+	vdev_file_close,
+	vdev_default_asize,
+	vdev_file_io_start,
+	vdev_file_io_done,
+	NULL,
+	NULL,
+	vdev_file_hold,
+	vdev_file_rele,
+	NULL,
+	vdev_default_xlate,
+	VDEV_TYPE_FILE,		/* name of this vdev type */
+	B_TRUE			/* leaf vdev */
 };
 
 void
@@ -322,18 +300,19 @@ vdev_file_fini(void)
 #ifndef _KERNEL
 
 vdev_ops_t vdev_disk_ops = {
-	.vdev_op_open =		vdev_file_open,
-	.vdev_op_close =	vdev_file_close,
-	.vdev_op_asize =	vdev_default_asize,
-	.vdev_op_io_start =	vdev_file_io_start,
-	.vdev_op_io_done =	vdev_file_io_done,
-	.vdev_op_state_change =	NULL,
-	.vdev_op_need_resilver = NULL,
-	.vdev_op_hold =		vdev_file_hold,
-	.vdev_op_rele =		vdev_file_rele,
-	.vdev_op_xlate =	vdev_default_xlate,
-	.vdev_op_type =		VDEV_TYPE_DISK,	/* name of this vdev type */
-	.vdev_op_leaf =		B_TRUE		/* leaf vdev */
+	vdev_file_open,
+	vdev_file_close,
+	vdev_default_asize,
+	vdev_file_io_start,
+	vdev_file_io_done,
+	NULL,
+	NULL,
+	vdev_file_hold,
+	vdev_file_rele,
+	NULL,
+	vdev_default_xlate,
+	VDEV_TYPE_DISK,		/* name of this vdev type */
+	B_TRUE			/* leaf vdev */
 };
 
 #endif

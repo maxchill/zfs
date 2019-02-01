@@ -3883,6 +3883,7 @@ vdev_get_stats_ex(vdev_t *vd, vdev_stat_t *vs, vdev_stat_ex_t *vsx)
 			 * the manual TRIM locks held, this is only an
 			 * estimate (although fairly accurate one).
 			 */
+			vs->vs_trim_notsup = vd->vdev_notrim;
 			vs->vs_trim_bytes_done = vd->vdev_trim_bytes_done;
 			vs->vs_trim_bytes_est = vd->vdev_trim_bytes_est;
 			vs->vs_trim_state = vd->vdev_trim_state;
@@ -4011,47 +4012,23 @@ vdev_stat_update(zio_t *zio, uint64_t psize)
 		/*
 		 * The bytes/ops/histograms are recorded at the leaf level and
 		 * aggregated into the higher level vdevs in vdev_get_stats().
-		 * Successful TRIM zios include aggregate statistics for all
-		 * discards which resulted from the single TRIM zio.
 		 */
-		if (!ZIO_IS_TRIM(zio)) {
-			vs->vs_ops[type]++;
-			vs->vs_bytes[type] += psize;
+		vs->vs_ops[type]++;
+		vs->vs_bytes[type] += psize;
 
-			if (flags & ZIO_FLAG_DELEGATED) {
-				vsx->vsx_agg_histo[zio->io_priority]
-				    [RQ_HISTO(zio->io_size)]++;
-			} else {
-				vsx->vsx_ind_histo[zio->io_priority]
-				    [RQ_HISTO(zio->io_size)]++;
-			}
+		if (flags & ZIO_FLAG_DELEGATED) {
+			vsx->vsx_agg_histo[zio->io_priority]
+			    [RQ_HISTO(zio->io_size)]++;
+		} else {
+			vsx->vsx_ind_histo[zio->io_priority]
+			    [RQ_HISTO(zio->io_size)]++;
+		}
 
-			if (zio->io_delta && zio->io_delay) {
-				vsx->vsx_queue_histo[zio->io_priority]
-				    [L_HISTO(zio->io_delta - zio->io_delay)]++;
-				vsx->vsx_disk_histo[type]
-				    [L_HISTO(zio->io_delay)]++;
-				vsx->vsx_total_histo[type]
-				    [L_HISTO(zio->io_delta)]++;
-			}
-		} else if (zio->io_dfl_stats != NULL) {
-			vdev_stat_trim_t *vsd = zio->io_dfl_stats;
-
-			vs->vs_ops[type] += vsd->vsd_ops;
-			vs->vs_bytes[type] += vsd->vsd_bytes;
-
-			for (int i = 0; i < VDEV_RQ_HISTO_BUCKETS; i++)
-				vsx->vsx_ind_histo[zio->io_priority][i] +=
-				    vsd->vsd_ind_histo[i];
-
-			for (int i = 0; i < VDEV_L_HISTO_BUCKETS; i++) {
-				vsx->vsx_queue_histo[zio->io_priority][i] +=
-				    vsd->vsd_queue_histo[i];
-				vsx->vsx_disk_histo[type][i] +=
-				    vsd->vsd_disk_histo[i];
-				vsx->vsx_total_histo[type][i] +=
-				    vsd->vsd_total_histo[i];
-			}
+		if (zio->io_delta && zio->io_delay) {
+			vsx->vsx_queue_histo[zio->io_priority]
+			    [L_HISTO(zio->io_delta - zio->io_delay)]++;
+			vsx->vsx_disk_histo[type][L_HISTO(zio->io_delay)]++;
+			vsx->vsx_total_histo[type][L_HISTO(zio->io_delta)]++;
 		}
 
 		mutex_exit(&vd->vdev_stat_lock);

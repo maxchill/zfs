@@ -1924,12 +1924,6 @@ spa_deadman_synctime(spa_t *spa)
 	return (spa->spa_deadman_synctime);
 }
 
-spa_forcetrim_t
-spa_get_forcetrim(spa_t *spa)
-{
-	return (spa->spa_forcetrim);
-}
-
 spa_autotrim_t
 spa_get_autotrim(spa_t *spa)
 {

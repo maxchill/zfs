@@ -14,7 +14,7 @@
 .\" CDDL HEADER, with the fields enclosed by brackets "[]" replaced with your
 .\" own identifying information:
 .\" Portions Copyright [yyyy] [name of copyright owner]
-.TH ZFS-MODULE-PARAMETERS 5 "Oct 28, 2017"
+.TH ZFS-MODULE-PARAMETERS 5 "Fed 1, 2019"
 .SH NAME
 zfs\-module\-parameters \- ZFS module parameters
 .SH DESCRIPTION
@@ -2309,44 +2309,91 @@ Default value: \fB75\fR%.
 .sp
 .ne 2
 .na
-\fBzfs_trim\fR (int)
+\fBzfs_trim_extent_bytes_max\fR (unsigned int)
 .ad
 .RS 12n
-Controls whether the underlying vdevs of the pool are notified when
-space is freed using the device-type-specific command set (TRIM here
-being a general placeholder term rather than referring to just the SATA
-TRIM command). This is frequently used on backing storage devices which
-support thin provisioning or pre-erasure of blocks on flash media.
+Maximum size of TRIM command.  Ranges larger than this will be split in to
+chunks no larger than \fBzfs_trim_extent_bytes_max\fR bytes before being
+issued to the device.
 .sp
-Default value: \fB1\fR.
+Default value: \fB134,217,728\fR.
 .RE
 
 .sp
 .ne 2
 .na
-\fBzfs_trim_min_ext_sz\fR (int)
+\fBzfs_trim_extent_bytes_min\fR (unsigned int)
 .ad
 .RS 12n
-Minimum size region in bytes over which a device-specific TRIM command
-will be sent to the underlying vdevs when \fBzfs_trim\fR is set.
+Minimum size of TRIM commands.  TRIM ranges smaller than this will be skipped
+and no TRIM issue to the device.  It's not uncommon for small TRIMs to have
+a significant negative impact of performance.  This value can be set to 0
+in order to TRIM all unallocated space in the pool.  This can be useful when
+capacity and not performance is the primary concern.
 .sp
-Default value: \fB131072\fR.
+Default value: \fB32,768\fR.
 .RE
 
 .sp
 .ne 2
 .na
-\fBzfs_trim_sync\fR (int)
+\fBzfs_trim_mem_percent\fR (unsigned int)
 .ad
 .RS 12n
-Controls whether the underlying vdevs should issue TRIM commands synchronously
-or asynchronously.  When set for synchronous operation, extents to TRIM are
-processed sequentially with each extent waiting for the last to complete.
-In asynchronous mode TRIM commands for all provided extents are submitted
-concurrently to the underlying vdev.  The optimal strategy depends on how
-the physical device handles TRIM commands.
+Allow up to 2% of system memory to be used by the autotrim property to
+tracking recently freed extents which need to be trimmed.  When this
+limit is reached extents which normally would be trimmed are ignored.
+When the autotrim property is set to off there is no additional memory
+requirement.
 .sp
-Default value: \fB1\fR.
+Default value: \fB2\fR.
+.RE
+
+.sp
+.ne 2
+.na
+\fBzfs_trim_ms_max\fR (unsigned int)
+.ad
+.RS 12n
+Maximum number of metaslabs per group that can be trimmed simultaneously.
+Note that when a metaslab is being trimmed it may not be allocated from.
+.sp
+Default value: \fB3\fR.
+.RE
+
+.sp
+.ne 2
+.na
+\fBzfs_trim_queue_limit\fR (unsigned int)
+.ad
+.RS 12n
+Maximum number of queued TRIMs outstanding per leaf vdev.  The number of
+concurrent TRIM commands issued to the device is controlled by the
+\fBzfs_vdev_trim_min_active\fR and \fBzfs_vdev_trim_max_active\fR module
+options.
+.sp
+Default value: \fB10\fR.
+.RE
+
+.sp
+.ne 2
+.na
+\fBzfs_trim_txg_batch\fR (unsigned int)
+.ad
+.RS 12n
+How many transaction groups worth of updates should be aggregated before
+TRIM operations are issued to the device.  This setting represents a
+trade-off between issuing more efficient TRIM operations, by allowing
+them to be aggregated longer, and issuing them promptly enough that the
+space is trimmed and available for use by the device.
+.sp
+Increasing this value will allow frees to be aggregated for a longer
+time.  This will result is larger TRIM operations, and increased memory
+usage in order to track the pending TRIMs.  Decreasing this value will
+have the opposite effect.  The default value of 32 was determined to be
+a reasonable compromise.
+.sp
+Default value: \fB32\fR.
 .RE
 
 .sp
@@ -2370,18 +2417,6 @@ Default value: \fB0\fR.
 Flush dirty data to disk at least every N seconds (maximum txg duration)
 .sp
 Default value: \fB5\fR.
-.RE
-
-.sp
-.ne 2
-.na
-\fBzfs_txgs_per_trim\fR (int)
-.ad
-.RS 12n
-Number of transaction groups over which device-specific TRIM commands
-are batched when \fBzfs_trim\fR is set.
-.sp
-Default value: \fB32\fR.
 .RE
 
 .sp

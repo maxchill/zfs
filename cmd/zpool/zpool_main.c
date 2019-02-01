@@ -1972,6 +1972,8 @@ print_status_trim(vdev_stat_t *vs, boolean_t verbose)
 
 			(void) printf(gettext("  (%d%% trimmed%s)"),
 			    trim_pct, zbuf);
+		} else if (vs->vs_trim_notsup) {
+			(void) printf(gettext("  (trim unsupported)"));
 		} else {
 			(void) printf(gettext("  (untrimmed)"));
 		}
@@ -3444,9 +3446,9 @@ static const name_and_columns_t iostat_top_labels[][IOSTAT_MAX_LABELS] =
 	    {"asyncq_wait", 2}, {"scrub"}, {"trim"}, {"autotrim"}},
 	[IOS_QUEUES] = {{"syncq_read", 2}, {"syncq_write", 2},
 	    {"asyncq_read", 2}, {"asyncq_write", 2}, {"scrubq_read", 2},
-	    {NULL}},
+	    {"trim", 2}, {NULL}},
 	[IOS_L_HISTO] = {{"total_wait", 2}, {"disk_wait", 2}, {"syncq_wait", 2},
-	    {"asyncq_wait", 2}, {"auto_trimq", 2}, {"man_trimq", 2}, {NULL}},
+	    {"asyncq_wait", 2}, {"trimq", 2}, {"autotrimq", 2}, {NULL}},
 	[IOS_RQ_HISTO] = {{"sync_read", 2}, {"sync_write", 2},
 	    {"async_read", 2}, {"async_write", 2}, {"scrub", 2},
 	    {"trim", 2}, {NULL}},

@@ -26,7 +26,6 @@
  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
  * Copyright 2016 Toomas Soome <tsoome@me.com>
- * Copyright 2017 Nexenta Systems, Inc.  All rights reserved.
  */
 
 #ifndef _ZIO_H
@@ -39,8 +38,6 @@
 #include <sys/avl.h>
 #include <sys/fs/zfs.h>
 #include <sys/zio_impl.h>
-#include <sys/dkio.h>
-#include <sys/dkioc_free_util.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -284,8 +281,6 @@ typedef void zio_done_func_t(zio_t *zio);
 extern int zio_dva_throttle_enabled;
 extern const char *zio_type_name[ZIO_TYPES];
 
-struct range_tree;
-
 /*
  * A bookmark is a four-tuple <objset, object, level, blkid> that uniquely
  * identifies any block in the pool.  By convention, the meta-objset (MOS)
@@ -470,11 +465,6 @@ struct zio {
 	uint64_t	io_size;
 	uint64_t	io_orig_size;
 
-	/* Used by trim zios */
-	dkioc_free_list_t	*io_dfl;
-	vdev_stat_trim_t	*io_dfl_stats;
-	boolean_t		io_dfl_free_on_destroy;
-
 	/* Stuff for the vdev stack */
 	vdev_t		*io_vd;
 	void		*io_vsd;
@@ -558,10 +548,6 @@ extern zio_t *zio_claim(zio_t *pio, spa_t *spa, uint64_t txg,
 
 extern zio_t *zio_ioctl(zio_t *pio, spa_t *spa, vdev_t *vd, int cmd,
     zio_done_func_t *done, void *private, enum zio_flag flags);
-
-extern zio_t *zio_trim_dfl(zio_t *pio, vdev_t *vd, dkioc_free_list_t *dfl,
-    zio_done_func_t *done, void *private, zio_priority_t priority,
-    enum zio_flag flags, boolean_t dfl_free_on_destroy);
 
 extern zio_t *zio_trim(zio_t *pio, vdev_t *vd, uint64_t offset, uint64_t size,
     zio_done_func_t *done, void *private, zio_priority_t priority,

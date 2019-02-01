@@ -1453,6 +1453,7 @@ lzc_initialize(const char *poolname, pool_initialize_func_t cmd_type,
  *	- EBUSY start requested but the device is already being either trimmed
  *	        or initialized
  *	- ESRCH cancel/suspend requested but device is not being initialized
+ *	- EOPNOTSUPP if the device does not support TRIM
  *
  * If the errlist is empty, then return value will be:
  *	- EINVAL if one or more arguments was invalid

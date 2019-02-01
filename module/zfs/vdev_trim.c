@@ -35,70 +35,48 @@
 #include <sys/dmu_tx.h>
 
 /*
- * Maximum number of metaslabs per group that can be trimmed simultaneously.
+ * Maximum size of TRIM command, ranges will be chunked in to 128MiB extents.
  */
-int max_trim_ms = 3;
-
-/* Maximum number of TRIMs outstanding per leaf vdev */
-int zfs_trim_limit = 1;
-
-/*
- * Tunable to allow for debugging SCSI UNMAP/SATA TRIM calls. Disabling
- * it will prevent ZFS from attempting to issue DKIOCFREE ioctls to the
- * underlying storage.
- */
-int zfs_trim_enabled = B_TRUE;
+unsigned int zfs_trim_extent_bytes_max = 128 * 1024 * 1024;
 
 /*
  * Minimum size of TRIM commands, extents smaller than 32Kib will be skipped.
  */
-uint64_t zfs_trim_min_extent_bytes = 32 * 1024;
+unsigned int zfs_trim_extent_bytes_min = 32 * 1024;
 
 /*
- * Maximum size of TRIM command, ranges will be chunked in to 128MiB extents.
+ * Maximum number of queued TRIMs outstanding per leaf vdev.  The number of
+ * concurrent TRIM commands issued to the device is controlled by the
+ * zfs_vdev_trim_min_active and zfs_vdev_trim_max_active module options.
  */
-uint64_t zfs_trim_max_extent_bytes = 128 * 1024 * 1024;
+unsigned int zfs_trim_queue_limit = 10;
 
 /*
- * All TRIM commands will be handled synchronously.
+ * Allow up to 2% of system memory to be used by the autotrim property to
+ * tracking recently freed extents which need to be trimmed.  When this
+ * limit is reached extents which normally would be trimmed are ignored.
  */
-int zfs_trim_sync = B_TRUE;
-/*
- * If we accumulate a lot of trim extents due to trim running slow, this
- * is the memory pressure valve. We limit the amount of memory consumed
- * by the extents in memory to physmem/zfs_trim_mem_lim_fact (by default
- * 2%). If we exceed this limit, we start throwing out new extents
- * without queueing them.
- */
-int zfs_trim_mem_lim_fact = 50;
+unsigned int zfs_trim_mem_percent = 2;
 
 /*
- * How many TXG's worth of updates should be aggregated per TRIM/UNMAP
- * issued to the underlying vdev. We keep two range trees of extents
- * (called "trim sets") to be trimmed per metaslab, the `current' and
- * the `previous' TS. New free's are added to the current TS. Then,
- * once `zfs_txgs_per_trim' transactions have elapsed, the `current'
- * TS becomes the `previous' TS and a new, blank TS is created to be
- * the new `current', which will then start accumulating any new frees.
- * Once another zfs_txgs_per_trim TXGs have passed, the previous TS's
- * extents are trimmed, the TS is destroyed and the current TS again
- * becomes the previous TS.
- * This serves to fulfill two functions: aggregate many small frees
- * into fewer larger trim operations (which should help with devices
- * which do not take so kindly to them) and to allow for disaster
- * recovery (extents won't get trimmed immediately, but instead only
- * after passing this rather long timeout, thus preserving
- * 'zfs import -F' functionality).
- * The exact default value of this tunable is a tradeoff between:
- * 1) Keeping the trim commands reasonably small.
- * 2) Keeping the ability to rollback back for as many txgs as possible.
- * 3) Waiting around too long that the user starts to get uneasy about not
- *	seeing any space being freed after they remove some files.
- * The default value of 32 is the maximum number of uberblocks in a vdev
- * label, assuming a 4k physical sector size (which seems to be the almost
- * universal smallest sector size used in SSDs).
+ * Maximum number of metaslabs per group that can be trimmed simultaneously.
  */
-int zfs_txgs_per_trim = 32;
+unsigned int zfs_trim_ms_max = 3;
+
+/*
+ * How many transaction groups worth of updates should be aggregated before
+ * TRIM operations are issued to the device.  This setting represents a
+ * trade-off between issuing more efficient TRIM operations, by allowing
+ * them to be aggregated longer, and issuing them promptly enough that the
+ * space is trimmed and available for use by the device.
+ *
+ * Increasing this value will allow frees to be aggregated for a longer
+ * time.  This will result is larger TRIM operations, and increased memory
+ * usage in order to track the pending TRIMs.  Decreasing this value will
+ * have the opposite effect.  The default value of 32 was determined to be
+ * a reasonable compromise.
+ */
+int zfs_trim_txg_batch = 32;
 
 typedef struct trim_args {
 	vdev_t		*trim_vdev;
@@ -256,29 +234,21 @@ vdev_trim_cb(zio_t *zio)
 		 * last offset back. (This works because spa_sync waits on
 		 * spa_txg_zio before it runs sync tasks.)
 		 */
-		uint64_t *off =
+		uint64_t *offset =
 		    &vd->vdev_trim_offset[zio->io_txg & TXG_MASK];
-		*off = MIN(*off, zio->io_offset);
+		*offset = MIN(*offset, zio->io_offset);
 	} else {
-		/*
-		 * Since trimming is best-effort, we ignore I/O errors and
-		 * rely on vdev_probe to determine if the errors are more
-		 * critical.
-		 */
-		if (zio->io_error != 0)
+		if (zio->io_error != 0) {
 			vd->vdev_stat.vs_trim_errors++;
-
-		uint64_t length = 0;
-		if (zio->io_dfl != NULL) {
-			for (int i = 0; i < zio->io_dfl->dfl_num_exts; i++)
-				length += zio->io_dfl->dfl_exts[i].dfle_length;
+			spa_iostats_trim_add(vd->vdev_spa, priority,
+			    0, 0, 0, 0, 1, zio->io_size);
+		} else {
+			spa_iostats_trim_add(vd->vdev_spa, priority,
+			    1, zio->io_size, 0, 0, 0, 0);
 		}
 
 		if (priority == ZIO_PRIORITY_TRIM)
-			vd->vdev_trim_bytes_done += length;
-
-		spa_iostats_trim_add(vd->vdev_spa, priority,
-		    1, length, 0, 0, !!zio->io_error);
+			vd->vdev_trim_bytes_done += zio->io_size;
 	}
 
 	ASSERT3U(vd->vdev_trim_inflight[priority - ZIO_PRIORITY_TRIM], >, 0);
@@ -300,7 +270,7 @@ vdev_trim_range(trim_args_t *ta, uint64_t start, uint64_t size)
 	/* Limit inflight trimming I/Os */
 	mutex_enter(&vd->vdev_trim_io_lock);
 	while (vd->vdev_trim_inflight[0] + vd->vdev_trim_inflight[1] >=
-	    zfs_trim_limit) {
+	    zfs_trim_queue_limit) {
 		cv_wait(&vd->vdev_trim_io_cv, &vd->vdev_trim_io_lock);
 	}
 	vd->vdev_trim_inflight[priority - ZIO_PRIORITY_TRIM]++;
@@ -355,16 +325,16 @@ vdev_trim_ranges(trim_args_t *ta)
 {
 	vdev_t *vd = ta->trim_vdev;
 	avl_tree_t *rt = &ta->trim_tree->rt_root;
-	uint64_t max_bytes = zfs_trim_max_extent_bytes;
+	uint64_t max_bytes = zfs_trim_extent_bytes_max;
 	spa_t *spa = vd->vdev_spa;
 
 	for (range_seg_t *rs = avl_first(rt); rs != NULL;
 	    rs = AVL_NEXT(rt, rs)) {
 		uint64_t size = rs->rs_end - rs->rs_start;
 
-		if (size < zfs_trim_min_extent_bytes) {
+		if (size < zfs_trim_extent_bytes_min) {
 			spa_iostats_trim_add(spa, ta->trim_priority,
-			    0, 0, 1, size, 0);
+			    0, 0, 1, size, 0, 0);
 			continue;
 		}
 
@@ -401,11 +371,11 @@ vdev_trim_mg_mark(metaslab_group_t *mg)
 	ASSERT(MUTEX_HELD(&mg->mg_ms_trim_lock));
 	ASSERT(mg->mg_trim_updating);
 
-	while (mg->mg_ms_trimming >= max_trim_ms) {
+	while (mg->mg_ms_trimming >= zfs_trim_ms_max) {
 		cv_wait(&mg->mg_ms_trim_cv, &mg->mg_ms_trim_lock);
 	}
 	mg->mg_ms_trimming++;
-	ASSERT3U(mg->mg_ms_trimming, <=, max_trim_ms);
+	ASSERT3U(mg->mg_ms_trimming, <=, zfs_trim_ms_max);
 }
 
 /*
@@ -930,8 +900,9 @@ vdev_autotrim_thread(void *arg)
 	ASSERT3P(vd->vdev_top, ==, vd);
 	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
 
-	while (!vd->vdev_trim_exit_wanted) {
-		int txgs_per_trim = MAX(zfs_txgs_per_trim, 1);
+	while (!vd->vdev_trim_exit_wanted && vdev_writeable(vd) &&
+	    !vd->vdev_removing) {
+		int txgs_per_trim = MAX(zfs_trim_txg_batch, 1);
 		boolean_t issued_trim = B_FALSE;
 
 		/*
@@ -1006,7 +977,7 @@ vdev_autotrim_thread(void *arg)
 
 		/*
 		 * Throttle auto-trimming to ensure that never more than
-		 * 1 / zfs_txgs_per_trim of the metaslabs are processed
+		 * 1 / zfs_trim_txg_batch of the metaslabs are processed
 		 * per-txg.  This defaults to 1 / 32, approximately 3%.
 		 * In the case auto-trim, it's already if the discard
 		 * commands are lost, we not need to wait for the sync.
@@ -1137,33 +1108,6 @@ vdev_trim_min_rate(spa_t *spa)
 	return (smallest_ms_sz / 1000);
 }
 
-/*
- * Update the aggregate statistics for a TRIM zio.
- */
-void
-vdev_trim_stat_update(zio_t *zio, uint64_t psize, vdev_trim_stat_flags_t flags)
-{
-	vdev_stat_trim_t *vsd = zio->io_dfl_stats;
-	hrtime_t now = gethrtime();
-	hrtime_t io_delta = io_delta = now - zio->io_timestamp;
-	hrtime_t io_delay = now - zio->io_delay;
-
-	if (flags & TRIM_STAT_OP) {
-		vsd->vsd_ops++;
-		vsd->vsd_bytes += psize;
-	}
-
-	if (flags & TRIM_STAT_RQ_HISTO) {
-		vsd->vsd_ind_histo[RQ_HISTO(psize)]++;
-	}
-
-	if (flags & TRIM_STAT_L_HISTO) {
-		vsd->vsd_queue_histo[L_HISTO(io_delta - io_delay)]++;
-		vsd->vsd_disk_histo[L_HISTO(io_delay)]++;
-		vsd->vsd_total_histo[L_HISTO(io_delta)]++;
-	}
-}
-
 #if defined(_KERNEL)
 EXPORT_SYMBOL(vdev_trim);
 EXPORT_SYMBOL(vdev_trim_stop);
@@ -1174,10 +1118,29 @@ EXPORT_SYMBOL(vdev_autotrim);
 EXPORT_SYMBOL(vdev_autotrim_stop);
 EXPORT_SYMBOL(vdev_autotrim_restart);
 
-/* XXX- Decide which module options to make available */
-module_param(zfs_trim_enabled, int, 0644);
-MODULE_PARM_DESC(zfs_trim, "Enable TRIM");
+/* BEGIN CSTYLED */
+module_param(zfs_trim_ms_max, uint, 0644);
+MODULE_PARM_DESC(zfs_trim_ms_max,
+    "Max metaslabs per group to concurrently TRIM");
 
-module_param(zfs_trim_sync, int, 0644);
-MODULE_PARM_DESC(zfs_trim_sync, "Issue TRIM commands synchronously");
+module_param(zfs_trim_queue_limit, uint, 0644);
+MODULE_PARM_DESC(zfs_trim_queue_limit,
+    "Max queued TRIMs outstanding per leaf vdev");
+
+module_param(zfs_trim_extent_bytes_min, uint, 0644);
+MODULE_PARM_DESC(zfs_trim_extent_bytes_min,
+    "Min size of TRIM commands, smaller will be skipped");
+
+module_param(zfs_trim_extent_bytes_max, uint, 0644);
+MODULE_PARM_DESC(zfs_trim_extent_bytes_max,
+    "Max size of TRIM commands, larger will be split");
+
+module_param(zfs_trim_mem_percent, uint, 0644);
+MODULE_PARM_DESC(zfs_trim_mem_percent,
+    "Max percent of memory used for autotrim");
+
+module_param(zfs_trim_txg_batch, uint, 0644);
+MODULE_PARM_DESC(zfs_trim_txg_batch,
+    "Number of txgs to aggregate frees before issuing TRIM");
+/* END CSTYLED */
 #endif

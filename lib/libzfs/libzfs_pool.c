@@ -2236,6 +2236,8 @@ xlate_trim_err(int err)
 		return (EZFS_TRIMMING);
 	case ESRCH:
 		return (EZFS_NO_TRIM);
+	case EOPNOTSUPP:
+		return (EZFS_TRIM_NOTSUP);
 	}
 	return (err);
 }

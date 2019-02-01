@@ -48,7 +48,6 @@
 #include <sys/abd.h>
 #include <sys/dsl_crypt.h>
 #include <sys/cityhash.h>
-#include <sys/dkioc_free_util.h>
 #include <sys/metaslab_impl.h>
 
 /*
@@ -852,12 +851,6 @@ zio_destroy(zio_t *zio)
 	list_destroy(&zio->io_child_list);
 	mutex_destroy(&zio->io_lock);
 	cv_destroy(&zio->io_cv);
-	if (zio->io_dfl_stats != NULL)
-		kmem_free(zio->io_dfl_stats, sizeof (vdev_stat_trim_t));
-	if (zio->io_dfl != NULL && zio->io_dfl_free_on_destroy)
-		dfl_free(zio->io_dfl);
-	else
-		ASSERT0(zio->io_dfl_free_on_destroy);
 	kmem_cache_free(zio_cache, zio);
 }
 
@@ -1219,89 +1212,25 @@ zio_ioctl(zio_t *pio, spa_t *spa, vdev_t *vd, int cmd,
 	return (zio);
 }
 
-/*
- * Construct a multi-extent mapping for the DKIOCFREE ioctl().
- *
- * Takes a dkioc_free_list_t instead of a range tree of extents. The `dfl`
- * argument is stored in the zio and shouldn't be altered by the caller after
- * calling zio_trim_dfl. If `dfl_free_on_destroy' is true, the zio will
- * destroy and free the list using dfl_free after the zio is done executing.
- */
-zio_t *
-zio_trim_dfl(zio_t *pio, vdev_t *vd, dkioc_free_list_t *dfl,
-    zio_done_func_t *done, void *private, zio_priority_t priority,
-    enum zio_flag flags, boolean_t dfl_free_on_destroy)
-{
-	zio_t *zio;
-
-	ASSERT(dfl->dfl_num_exts != 0);
-	ASSERT(vd->vdev_ops->vdev_op_leaf != 0);
-
-	if (!vdev_writeable(vd)) {
-		/* Skip unavailable vdevs, just create a dummy zio. */
-		zio = zio_null(pio, vd->vdev_spa, vd, done, private, 0);
-		zio->io_dfl = dfl;
-		zio->io_dfl_free_on_destroy = dfl_free_on_destroy;
-		return (zio);
-	}
-
-	/*
-	 * A trim zio is a special ioctl zio that can enter the vdev
-	 * queue. We don't want to be sorted in the queue by offset,
-	 * but sometimes the queue requires that, so we fake an
-	 * offset value by using the offset of the first extent
-	 * and the minimum allocation unit on the vdev to keep the
-	 * queue's algorithms working more-or-less as they should.
-	 */
-	uint64_t off = dfl->dfl_exts[0].dfle_start;
-	uint64_t size = 1 << vd->vdev_top->vdev_ashift;
-
-	zio = zio_create(pio, vd->vdev_spa, 0, NULL, NULL,
-	    size, size, done, private, ZIO_TYPE_IOCTL, priority,
-	    flags | ZIO_FLAG_CANFAIL | ZIO_FLAG_DONT_RETRY |
-	    ZIO_FLAG_DONT_PROPAGATE | ZIO_FLAG_DONT_AGGREGATE,
-	    vd, off, NULL, ZIO_STAGE_OPEN, ZIO_TRIM_PIPELINE);
-	zio->io_cmd = DKIOCFREE;
-	zio->io_dfl = dfl;
-	zio->io_dfl_free_on_destroy = dfl_free_on_destroy;
-
-	return (zio);
-}
-
-/*
- * Construct a single extent mapping for the DKIOCFREE ioctl().
- *
- * For Linux the use of the ioctl() interface only adds overhead and it
- * would be simpler to submit this as a normal discard operation.
- * However, DKIOCFREE is the interface presented on Illumos and this has
- * been preserved for the moment to improve compatibility.
- */
 zio_t *
 zio_trim(zio_t *pio, vdev_t *vd, uint64_t offset, uint64_t size,
     zio_done_func_t *done, void *private, zio_priority_t priority,
     enum zio_flag flags)
 {
-	dkioc_free_list_t *dfl;
-	int extents = 1;
 	zio_t *zio;
 
-	/* Verify we're a multiple of the vdev ashift */
+	ASSERT0(vd->vdev_notrim);
 	ASSERT0(vd->vdev_children);
 	ASSERT0(offset & ((1 << vd->vdev_ashift) - 1));
 	ASSERT0(size & ((1 << vd->vdev_ashift) - 1));
+	ASSERT3U(size, !=, 0);
 
-	dfl = dfl_alloc(extents, KM_SLEEP);
-	dfl->dfl_flags = 0;
-	dfl->dfl_num_exts = extents;
-	dfl->dfl_offset = VDEV_LABEL_START_SIZE;
-	dfl->dfl_ck_func = NULL;
-	dfl->dfl_ck_arg = NULL;
-
-	dfl->dfl_exts[0].dfle_start = offset;
-	dfl->dfl_exts[0].dfle_length = size;
-
-	zio = zio_trim_dfl(pio, vd, dfl, done, private, priority,
-	    flags, B_TRUE);
+	zio = zio_create(pio, vd->vdev_spa, 0, NULL, NULL,
+	    size, size, done, private, ZIO_TYPE_TRIM, priority,
+	    flags | ZIO_FLAG_CANFAIL | ZIO_FLAG_DONT_RETRY |
+	    ZIO_FLAG_DONT_PROPAGATE | ZIO_FLAG_DONT_AGGREGATE,
+	    vd, offset + VDEV_LABEL_START_SIZE, NULL,
+	    ZIO_STAGE_OPEN, ZIO_TRIM_PIPELINE);
 
 	return (zio);
 }
@@ -3778,9 +3707,8 @@ zio_vdev_io_start(zio_t *zio)
 		return (zio);
 	}
 
-	if (vd->vdev_ops->vdev_op_leaf &&
-	    (zio->io_type == ZIO_TYPE_READ || zio->io_type == ZIO_TYPE_WRITE ||
-	    ZIO_IS_TRIM(zio))) {
+	if (vd->vdev_ops->vdev_op_leaf && (zio->io_type == ZIO_TYPE_READ ||
+	    zio->io_type == ZIO_TYPE_WRITE || zio->io_type == ZIO_TYPE_TRIM)) {
 
 		if (zio->io_type == ZIO_TYPE_READ && vdev_cache_read(zio))
 			return (zio);
@@ -3812,7 +3740,7 @@ zio_vdev_io_done(zio_t *zio)
 	}
 
 	ASSERT(zio->io_type == ZIO_TYPE_READ ||
-	    zio->io_type == ZIO_TYPE_WRITE || ZIO_IS_TRIM(zio));
+	    zio->io_type == ZIO_TYPE_WRITE || zio->io_type == ZIO_TYPE_TRIM);
 
 	if (zio->io_delay)
 		zio->io_delay = gethrtime() - zio->io_delay;
@@ -3831,7 +3759,7 @@ zio_vdev_io_done(zio_t *zio)
 		if (zio_injection_enabled && zio->io_error == 0)
 			zio->io_error = zio_handle_label_injection(zio, EIO);
 
-		if (zio->io_error && !ZIO_IS_TRIM(zio)) {
+		if (zio->io_error && zio->io_type != ZIO_TYPE_TRIM) {
 			if (!vdev_accessible(vd, zio)) {
 				zio->io_error = SET_ERROR(ENXIO);
 			} else {
@@ -3968,8 +3896,6 @@ zio_vdev_io_assess(zio_t *zio)
 	    zio->io_type == ZIO_TYPE_IOCTL && vd != NULL) {
 		if (zio->io_cmd == DKIOCFLUSHWRITECACHE)
 			vd->vdev_nowritecache = B_TRUE;
-		if (zio->io_cmd == DKIOCFREE)
-			vd->vdev_notrim = B_TRUE;
 	}
 
 	if (zio->io_error)

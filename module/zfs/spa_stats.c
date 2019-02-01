@@ -892,12 +892,14 @@ static spa_iostats_t spa_iostats_template = {
 	{ "trim_bytes_written",			KSTAT_DATA_UINT64 },
 	{ "trim_extents_skipped",		KSTAT_DATA_UINT64 },
 	{ "trim_bytes_skipped",			KSTAT_DATA_UINT64 },
-	{ "trim_errors",			KSTAT_DATA_UINT64 },
+	{ "trim_extents_failed",		KSTAT_DATA_UINT64 },
+	{ "trim_bytes_failed",			KSTAT_DATA_UINT64 },
 	{ "autotrim_extents_written",		KSTAT_DATA_UINT64 },
 	{ "autotrim_bytes_written",		KSTAT_DATA_UINT64 },
 	{ "autotrim_extents_skipped",		KSTAT_DATA_UINT64 },
 	{ "autotrim_bytes_skipped",		KSTAT_DATA_UINT64 },
-	{ "autotrim_errors",			KSTAT_DATA_UINT64 },
+	{ "autotrim_extents_failed",		KSTAT_DATA_UINT64 },
+	{ "autotrim_bytes_failed",		KSTAT_DATA_UINT64 },
 };
 
 #define	SPA_IOSTATS_ADD(stat, val) \
@@ -907,7 +909,7 @@ extern void
 spa_iostats_trim_add(spa_t *spa, zio_priority_t priority,
     uint64_t extents_written, uint64_t bytes_written,
     uint64_t extents_skipped, uint64_t bytes_skipped,
-    uint64_t errors)
+    uint64_t extents_failed, uint64_t bytes_failed)
 {
 	spa_history_kstat_t *shk = &spa->spa_stats.iostats;
 	kstat_t *ksp = shk->kstat;
@@ -922,13 +924,15 @@ spa_iostats_trim_add(spa_t *spa, zio_priority_t priority,
 		SPA_IOSTATS_ADD(trim_bytes_written, bytes_written);
 		SPA_IOSTATS_ADD(trim_extents_skipped, extents_skipped);
 		SPA_IOSTATS_ADD(trim_bytes_skipped, bytes_skipped);
-		SPA_IOSTATS_ADD(trim_errors, errors);
+		SPA_IOSTATS_ADD(trim_extents_failed, extents_failed);
+		SPA_IOSTATS_ADD(trim_bytes_failed, bytes_failed);
 	} else {
 		SPA_IOSTATS_ADD(autotrim_extents_written, extents_written);
 		SPA_IOSTATS_ADD(autotrim_bytes_written, bytes_written);
 		SPA_IOSTATS_ADD(autotrim_extents_skipped, extents_skipped);
 		SPA_IOSTATS_ADD(autotrim_bytes_skipped, bytes_skipped);
-		SPA_IOSTATS_ADD(autotrim_errors, errors);
+		SPA_IOSTATS_ADD(autotrim_extents_failed, extents_failed);
+		SPA_IOSTATS_ADD(autotrim_bytes_failed, bytes_failed);
 	}
 }
 

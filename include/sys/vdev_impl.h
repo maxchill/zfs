@@ -22,7 +22,6 @@
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2011, 2018 by Delphix. All rights reserved.
  * Copyright (c) 2017, Intel Corporation.
- * Copyright 2017 Nexenta Systems, Inc. All rights reserved.
  */
 
 #ifndef _SYS_VDEV_IMPL_H
@@ -288,8 +287,8 @@ struct vdev {
 	uint64_t	vdev_trim_last_offset;
 	uint64_t	vdev_trim_bytes_est;
 	uint64_t	vdev_trim_bytes_done;
-	uint64_t	vdev_trim_rate;	/* requested rate (bytes/sec) */
-	uint64_t	vdev_trim_full; /* requested full TRIM */
+	uint64_t	vdev_trim_rate;		/* requested rate (bytes/sec) */
+	uint64_t	vdev_trim_full;		/* requested full TRIM */
 	time_t		vdev_trim_action_time;	/* start and end time */
 
 	/* for limiting outstanding I/Os (initialize and TRIM) */
