@@ -360,14 +360,6 @@ struct metaslab {
 	range_tree_t	*ms_allocatable;
 
 	/*
-	 * The following range trees are used to track pending trims.
-	 */
-	range_tree_t	*ms_cur_ts;	/* currently prepared trims */
-	range_tree_t	*ms_prev_ts;	/* previous (aging) trims */
-	range_tree_t	*ms_trimming_ts; /* in flight trims */
-	kcondvar_t	ms_trim_cv;
-
-	/*
 	 * The following range trees are accessed only from syncing context.
 	 * ms_free*tree only have entries while syncing, and are empty
 	 * between syncs.
@@ -376,9 +368,9 @@ struct metaslab {
 	range_tree_t	*ms_freed;	/* already freed this syncing txg */
 	range_tree_t	*ms_defer[TXG_DEFER_SIZE];
 	range_tree_t	*ms_checkpointing; /* to add to the checkpoint */
+	range_tree_t	*ms_trim;
 
 	boolean_t	ms_condensing;	/* condensing? */
-	kcondvar_t	ms_condensing_cv;
 	boolean_t	ms_condense_wanted;
 	uint64_t	ms_condense_checked_txg;
 

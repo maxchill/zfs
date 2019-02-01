@@ -229,22 +229,6 @@
  * locking is, always, based on spa_namespace_lock and spa_config_lock[].
  */
 
-struct spa_trimstats {
-	kstat_named_t	st_extents;		/* # of extents issued to zio */
-	kstat_named_t	st_bytes;		/* # of bytes issued to zio */
-	kstat_named_t	st_extents_skipped;	/* # of extents too small */
-	kstat_named_t	st_bytes_skipped;	/* bytes in extents_skipped */
-	kstat_named_t	st_auto_slow;		/* trim slow, exts dropped */
-};
-
-static spa_trimstats_t spa_trimstats_template = {
-	{ "extents",		KSTAT_DATA_UINT64 },
-	{ "bytes",		KSTAT_DATA_UINT64 },
-	{ "extents_skipped",	KSTAT_DATA_UINT64 },
-	{ "bytes_skipped",	KSTAT_DATA_UINT64 },
-	{ "auto_slow",		KSTAT_DATA_UINT64 },
-};
-
 static avl_tree_t spa_namespace_avl;
 kmutex_t spa_namespace_lock;
 static kcondvar_t spa_namespace_cv;
@@ -438,14 +422,6 @@ int zfs_user_indirect_is_special = B_TRUE;
 int zfs_special_class_metadata_reserve_pct = 25;
 
 /*
- * Percentage of the number of CPUs to use as the autotrim taskq thread count.
- */
-int zfs_auto_trim_taskq_batch_pct = 75;
-
-static void spa_trimstats_create(spa_t *spa);
-static void spa_trimstats_destroy(spa_t *spa);
-
-/*
  * ==========================================================================
  * SPA config locking
  * ==========================================================================
@@ -457,11 +433,7 @@ spa_config_lock_init(spa_t *spa)
 		spa_config_lock_t *scl = &spa->spa_config_lock[i];
 		mutex_init(&scl->scl_lock, NULL, MUTEX_DEFAULT, NULL);
 		cv_init(&scl->scl_cv, NULL, CV_DEFAULT, NULL);
-#ifdef	ZFS_DEBUG
-		zfs_refcount_create_tracked(&scl->scl_count);
-#else
 		zfs_refcount_create_untracked(&scl->scl_count);
-#endif
 		scl->scl_writer = NULL;
 		scl->scl_write_wanted = 0;
 	}
@@ -668,14 +640,12 @@ spa_add(const char *name, nvlist_t *config, const char *altroot)
 	mutex_init(&spa->spa_suspend_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&spa->spa_vdev_top_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&spa->spa_feat_stats_lock, NULL, MUTEX_DEFAULT, NULL);
-	mutex_init(&spa->spa_auto_trim_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	cv_init(&spa->spa_async_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&spa->spa_evicting_os_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&spa->spa_proc_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&spa->spa_scrub_io_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&spa->spa_suspend_cv, NULL, CV_DEFAULT, NULL);
-	cv_init(&spa->spa_auto_trim_done_cv, NULL, CV_DEFAULT, NULL);
 
 	for (int t = 0; t < TXG_SIZE; t++)
 		bplist_create(&spa->spa_free_bplist[t]);
@@ -746,8 +716,6 @@ spa_add(const char *name, nvlist_t *config, const char *altroot)
 		    KM_SLEEP) == 0);
 	}
 
-	spa_trimstats_create(spa);
-
 	spa->spa_min_ashift = INT_MAX;
 	spa->spa_max_ashift = 0;
 
@@ -816,8 +784,6 @@ spa_remove(spa_t *spa)
 	spa_stats_destroy(spa);
 	spa_config_lock_destroy(spa);
 
-	spa_trimstats_destroy(spa);
-
 	for (int t = 0; t < TXG_SIZE; t++)
 		bplist_destroy(&spa->spa_free_bplist[t]);
 
@@ -828,7 +794,6 @@ spa_remove(spa_t *spa)
 	cv_destroy(&spa->spa_proc_cv);
 	cv_destroy(&spa->spa_scrub_io_cv);
 	cv_destroy(&spa->spa_suspend_cv);
-	cv_destroy(&spa->spa_auto_trim_done_cv);
 
 	mutex_destroy(&spa->spa_async_lock);
 	mutex_destroy(&spa->spa_errlist_lock);
@@ -842,7 +807,6 @@ spa_remove(spa_t *spa)
 	mutex_destroy(&spa->spa_suspend_lock);
 	mutex_destroy(&spa->spa_vdev_top_lock);
 	mutex_destroy(&spa->spa_feat_stats_lock);
-	mutex_destroy(&spa->spa_auto_trim_lock);
 
 	kmem_free(spa, sizeof (spa_t));
 }
@@ -1161,7 +1125,6 @@ spa_vdev_enter(spa_t *spa)
 {
 	mutex_enter(&spa->spa_vdev_top_lock);
 	mutex_enter(&spa_namespace_lock);
-	mutex_enter(&spa->spa_auto_trim_lock);
 	return (spa_vdev_config_enter(spa));
 }
 
@@ -1266,7 +1229,6 @@ int
 spa_vdev_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error)
 {
 	spa_vdev_config_exit(spa, vd, txg, error, FTAG);
-	mutex_exit(&spa->spa_auto_trim_lock);
 	mutex_exit(&spa_namespace_lock);
 	mutex_exit(&spa->spa_vdev_top_lock);
 
@@ -2492,140 +2454,6 @@ spa_suspend_async_destroy(spa_t *spa)
 	return (B_FALSE);
 }
 
-int
-spa_trimstats_kstat_update(kstat_t *ksp, int rw)
-{
-	spa_t *spa;
-	spa_trimstats_t *trimstats;
-	int i;
-
-	ASSERT(ksp != NULL);
-
-	if (rw == KSTAT_WRITE) {
-		spa = ksp->ks_private;
-		trimstats = spa->spa_trimstats;
-		for (i = 0; i < sizeof (spa_trimstats_t) /
-		    sizeof (kstat_named_t); ++i)
-			((kstat_named_t *)trimstats)[i].value.ui64 = 0;
-	}
-	return (0);
-}
-
-/*
- * Creates the trim kstats structure for a spa.
- */
-static void
-spa_trimstats_create(spa_t *spa)
-{
-	char name[KSTAT_STRLEN];
-	kstat_t *ksp;
-
-	if (spa->spa_name[0] == '$')
-		return;
-
-	ASSERT3P(spa->spa_trimstats, ==, NULL);
-	ASSERT3P(spa->spa_trimstats_ks, ==, NULL);
-
-	(void) snprintf(name, KSTAT_STRLEN, "zfs/%s", spa_name(spa));
-	ksp = kstat_create(name, 0, "trimstats", "misc",
-	    KSTAT_TYPE_NAMED, sizeof (spa_trimstats_template) /
-	    sizeof (kstat_named_t), KSTAT_FLAG_VIRTUAL);
-	if (ksp != NULL) {
-		ksp->ks_private = spa;
-		ksp->ks_update = spa_trimstats_kstat_update;
-		spa->spa_trimstats_ks = ksp;
-		spa->spa_trimstats =
-		    kmem_alloc(sizeof (spa_trimstats_t), KM_SLEEP);
-		*spa->spa_trimstats = spa_trimstats_template;
-		spa->spa_trimstats_ks->ks_data = spa->spa_trimstats;
-		kstat_install(spa->spa_trimstats_ks);
-	} else {
-		cmn_err(CE_NOTE, "!Cannot create trim kstats for pool %s",
-		    spa->spa_name);
-	}
-}
-
-/*
- * Destroys the trim kstats for a spa.
- */
-static void
-spa_trimstats_destroy(spa_t *spa)
-{
-	if (spa->spa_trimstats_ks) {
-		kstat_delete(spa->spa_trimstats_ks);
-		kmem_free(spa->spa_trimstats, sizeof (spa_trimstats_t));
-		spa->spa_trimstats_ks = NULL;
-	}
-}
-
-/*
- * Updates the numerical trim kstats for a spa.
- */
-void
-spa_trimstats_update(spa_t *spa, uint64_t extents, uint64_t bytes,
-    uint64_t extents_skipped, uint64_t bytes_skipped)
-{
-	spa_trimstats_t *st = spa->spa_trimstats;
-	if (st) {
-		atomic_add_64(&st->st_extents.value.ui64, extents);
-		atomic_add_64(&st->st_bytes.value.ui64, bytes);
-		atomic_add_64(&st->st_extents_skipped.value.ui64,
-		    extents_skipped);
-		atomic_add_64(&st->st_bytes_skipped.value.ui64,
-		    bytes_skipped);
-	}
-}
-
-/*
- * Increments the slow-trim kstat for a spa.
- */
-void
-spa_trimstats_auto_slow_incr(spa_t *spa)
-{
-	spa_trimstats_t *st = spa->spa_trimstats;
-	if (st)
-		atomic_inc_64(&st->st_auto_slow.value.ui64);
-}
-
-/*
- * Creates the taskq used for dispatching auto-trim. This is called only when
- * the property is set to `on' or when the pool is loaded (and the autotrim
- * property is `on').
- */
-void
-spa_auto_trim_taskq_create(spa_t *spa)
-{
-	char *name = kmem_alloc(MAXPATHLEN, KM_SLEEP);
-
-	/* Don't create the taskq if the pool is unloading */
-	if (spa->spa_sync_on == B_FALSE)
-		return;
-
-	ASSERT(MUTEX_HELD(&spa->spa_auto_trim_lock));
-	ASSERT(spa->spa_auto_trim_taskq == NULL);
-	(void) snprintf(name, MAXPATHLEN, "z_atrim_%s", spa->spa_name);
-	spa->spa_auto_trim_taskq = taskq_create(name,
-	    zfs_auto_trim_taskq_batch_pct, minclsyspri, 1, INT_MAX,
-	    TASKQ_THREADS_CPU_PCT);
-	VERIFY(spa->spa_auto_trim_taskq != NULL);
-	kmem_free(name, MAXPATHLEN);
-}
-
-/*
- * Destroys the taskq created in spa_auto_trim_taskq_create. The taskq
- * is only destroyed when the autotrim property is set to `off'.
- */
-void
-spa_auto_trim_taskq_destroy(spa_t *spa)
-{
-	ASSERT(MUTEX_HELD(&spa->spa_auto_trim_lock));
-	ASSERT(spa->spa_auto_trim_taskq != NULL);
-	while (spa->spa_num_auto_trimming != 0)
-		cv_wait(&spa->spa_auto_trim_done_cv, &spa->spa_auto_trim_lock);
-	taskq_destroy(spa->spa_auto_trim_taskq);
-	spa->spa_auto_trim_taskq = NULL;
-}
-
 #if defined(_KERNEL)
 
 #include <linux/mod_compat.h>
@@ -2853,11 +2681,6 @@ MODULE_PARM_DESC(zfs_ddt_data_is_special,
 module_param(zfs_user_indirect_is_special, int, 0644);
 MODULE_PARM_DESC(zfs_user_indirect_is_special,
 	"Place user data indirect blocks into the special class");
-
-module_param(zfs_auto_trim_taskq_batch_pct, int, 0644);
-MODULE_PARM_DESC(zfs_auto_trim_taskq_batch_pct,
-	"Percentage of the number of CPUs to use as the autotrim taskq"
-	" thread count");
 
 /* END CSTYLED */
 #endif

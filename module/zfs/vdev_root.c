@@ -151,7 +151,6 @@ vdev_ops_t vdev_root_ops = {
 	.vdev_op_hold =		NULL,		/* not applicable to the root */
 	.vdev_op_rele =		NULL,		/* not applicable to the root */
 	.vdev_op_xlate =	NULL,		/* not applicable to the root */
-	.vdev_op_trim =		NULL,		/* not applicable to the root */
 	.vdev_op_type =		VDEV_TYPE_ROOT,	/* name of this vdev type */
 	.vdev_op_leaf =		B_FALSE		/* not a leaf vdev */
 };

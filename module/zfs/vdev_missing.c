@@ -90,7 +90,6 @@ vdev_ops_t vdev_missing_ops = {
 	.vdev_op_need_resilver = NULL,
 	.vdev_op_hold =		NULL,
 	.vdev_op_rele =		NULL,
-	.vdev_op_trim =		NULL,
 	.vdev_op_xlate =	NULL,
 	.vdev_op_type =		VDEV_TYPE_MISSING, /* name of this vdev type */
 	.vdev_op_leaf =		B_TRUE		/* leaf vdev */

@@ -78,8 +78,6 @@ typedef void	vdev_state_change_func_t(vdev_t *vd, int, int);
 typedef boolean_t vdev_need_resilver_func_t(vdev_t *vd, uint64_t, size_t);
 typedef void	vdev_hold_func_t(vdev_t *vd);
 typedef void	vdev_rele_func_t(vdev_t *vd);
-typedef void	vdev_trim_func_t(vdev_t *vd, zio_t *pio,
-    dkioc_free_list_t *trim_exts, zio_priority_t priority);
 
 typedef void	vdev_remap_cb_t(uint64_t inner_offset, vdev_t *vd,
     uint64_t offset, uint64_t size, void *arg);
@@ -103,14 +101,11 @@ typedef const struct vdev_ops {
 	vdev_hold_func_t		*vdev_op_hold;
 	vdev_rele_func_t		*vdev_op_rele;
 	vdev_remap_func_t		*vdev_op_remap;
-	vdev_trim_func_t		*vdev_op_trim;
-
 	/*
 	 * For translating ranges from non-leaf vdevs (e.g. raidz) to leaves.
 	 * Used when initializing vdevs. Isn't used by leaf ops.
 	 */
 	vdev_xlation_func_t		*vdev_op_xlate;
-
 	char				vdev_op_type[16];
 	boolean_t			vdev_op_leaf;
 } vdev_ops_t;
@@ -291,13 +286,10 @@ struct vdev {
 	kcondvar_t	vdev_trim_cv;
 	uint64_t	vdev_trim_offset[TXG_SIZE];
 	uint64_t	vdev_trim_last_offset;
-	range_tree_t	*vdev_trim_tree;  /* valid while trimming */
-
 	uint64_t	vdev_trim_bytes_est;
 	uint64_t	vdev_trim_bytes_done;
 	uint64_t	vdev_trim_rate;	/* requested rate (bytes/sec) */
 	uint64_t	vdev_trim_full; /* requested full TRIM */
-	uint64_t	vdev_trim_rate_est;	/* est rate (bytes/sec) */
 	time_t		vdev_trim_action_time;	/* start and end time */
 
 	/* for limiting outstanding I/Os (initialize and TRIM) */
@@ -306,7 +298,7 @@ struct vdev {
 	uint64_t	vdev_initialize_inflight;
 	kmutex_t	vdev_trim_io_lock;
 	kcondvar_t	vdev_trim_io_cv;
-	uint64_t	vdev_trim_inflight;
+	uint64_t	vdev_trim_inflight[2];
 
 	/*
 	 * Values stored in the config for an indirect or removing vdev.
@@ -508,7 +500,6 @@ extern int vdev_dtl_load(vdev_t *vd);
 extern void vdev_sync(vdev_t *vd, uint64_t txg);
 extern void vdev_sync_done(vdev_t *vd, uint64_t txg);
 extern void vdev_dirty(vdev_t *vd, int flags, void *arg, uint64_t txg);
-extern boolean_t vdev_is_dirty(vdev_t *vd, int flags, void *arg);
 extern void vdev_dirty_leaves(vdev_t *vd, int flags, uint64_t txg);
 
 /*

@@ -26,7 +26,6 @@
 #include <sys/multilist.h>
 #include <sys/arc_impl.h>
 #include <sys/vdev_impl.h>
-#include <sys/metaslab_impl.h>
 #include <sys/zio.h>
 #include <sys/dbuf.h>
 #include <sys/dmu_objset.h>

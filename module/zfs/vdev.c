@@ -2378,23 +2378,6 @@ vdev_dirty(vdev_t *vd, int flags, void *arg, uint64_t txg)
 	(void) txg_list_add(&vd->vdev_spa->spa_vdev_txg_list, vd, txg);
 }
 
-boolean_t
-vdev_is_dirty(vdev_t *vd, int flags, void *arg)
-{
-	ASSERT(vd == vd->vdev_top);
-	ASSERT(!vd->vdev_ishole);
-	ASSERT(ISP2(flags));
-	ASSERT(spa_writeable(vd->vdev_spa));
-	ASSERT3U(flags, ==, VDD_METASLAB);
-
-	for (uint64_t txg = 0; txg < TXG_SIZE; txg++) {
-		if (txg_list_member(&vd->vdev_ms_list, arg, txg))
-			return (B_TRUE);
-	}
-
-	return (B_FALSE);
-}
-
 void
 vdev_dirty_leaves(vdev_t *vd, int flags, uint64_t txg)
 {

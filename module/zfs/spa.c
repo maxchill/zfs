@@ -1448,17 +1448,7 @@ spa_unload(spa_t *spa)
 		vdev_t *root_vdev = spa->spa_root_vdev;
 		vdev_initialize_stop_all(root_vdev, VDEV_INITIALIZE_ACTIVE);
 		vdev_trim_stop_all(root_vdev, VDEV_TRIM_ACTIVE);
-
-		mutex_enter(&spa->spa_auto_trim_lock);
-		while (spa->spa_num_auto_trimming > 0) {
-			cv_wait(&spa->spa_auto_trim_done_cv,
-			    &spa->spa_auto_trim_lock);
-		}
-
-		if (spa->spa_auto_trim_taskq)
-			spa_auto_trim_taskq_destroy(spa);
-
-		mutex_exit(&spa->spa_auto_trim_lock);
+		vdev_auto_trim_stop(spa);
 	}
 
 	/*
@@ -4220,16 +4210,6 @@ spa_load_impl(spa_t *spa, spa_import_type_t type, char **ereport)
 		mmp_thread_start(spa);
 
 		/*
-		 * Start the auto trim taskq if autotrim is enabled.
-		 */
-		mutex_enter(&spa->spa_auto_trim_lock);
-		if (spa->spa_auto_trim == SPA_AUTO_TRIM_ON &&
-		    strcmp(spa->spa_name, TRYIMPORT_NAME) != 0)
-			spa_auto_trim_taskq_create(spa);
-		mutex_exit(&spa->spa_auto_trim_lock);
-
-
-		/*
 		 * Wait for all claims to sync.  We sync up to the highest
 		 * claimed log block birth time so that claimed log blocks
 		 * don't appear to be from the future.  spa_claim_max_txg
@@ -4281,6 +4261,8 @@ spa_load_impl(spa_t *spa, spa_import_type_t type, char **ereport)
 
 		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
 		vdev_initialize_restart(spa->spa_root_vdev);
+		vdev_trim_restart(spa->spa_root_vdev);
+		vdev_auto_trim_restart(spa);
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
 	}
 
@@ -5290,12 +5272,6 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 		spa_configfile_set(spa, props, B_FALSE);
 		spa_sync_props(props, tx);
 	}
-
-	/* Handle "zpool create -o autotrim=on" */
-	uint64_t auto_trim;
-	if (nvlist_lookup_uint64(props, zpool_prop_to_name(ZPOOL_PROP_AUTOTRIM),
-	    &auto_trim) == 0)
-		spa->spa_auto_trim = auto_trim;
 
 	dmu_tx_commit(tx);
 
@@ -6972,8 +6948,10 @@ out:
 			vml[c]->vdev_offline = B_FALSE;
 	}
 
-	/* restart initializing disks as necessary */
+	/* restart initializing or trimming disks as necessary */
 	spa_async_request(spa, SPA_ASYNC_INITIALIZE_RESTART);
+	spa_async_request(spa, SPA_ASYNC_TRIM_RESTART);
+	spa_async_request(spa, SPA_ASYNC_AUTOTRIM);
 
 	vdev_reopen(spa->spa_root_vdev);
 
@@ -7356,20 +7334,18 @@ spa_async_thread(void *arg)
 		mutex_exit(&spa_namespace_lock);
 	}
 
-	/*
-	 * Trim taskq management.
-	 */
-	if (tasks & SPA_ASYNC_AUTO_TRIM_TASKQ_CREATE) {
-		mutex_enter(&spa->spa_auto_trim_lock);
-		if (spa->spa_auto_trim_taskq == NULL)
-			spa_auto_trim_taskq_create(spa);
-		mutex_exit(&spa->spa_auto_trim_lock);
+	if (tasks & SPA_ASYNC_TRIM_RESTART) {
+		mutex_enter(&spa_namespace_lock);
+		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+		vdev_trim_restart(spa->spa_root_vdev);
+		spa_config_exit(spa, SCL_CONFIG, FTAG);
+		mutex_exit(&spa_namespace_lock);
 	}
-	if (tasks & SPA_ASYNC_AUTO_TRIM_TASKQ_DESTROY) {
-		mutex_enter(&spa->spa_auto_trim_lock);
-		if (spa->spa_auto_trim_taskq != NULL)
-			spa_auto_trim_taskq_destroy(spa);
-		mutex_exit(&spa->spa_auto_trim_lock);
+
+	if (tasks & SPA_ASYNC_AUTOTRIM) {
+		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+		vdev_auto_trim_restart(spa);
+		spa_config_exit(spa, SCL_CONFIG, FTAG);
 	}
 
 	/*
@@ -7459,15 +7435,6 @@ spa_async_request(spa_t *spa, int task)
 	zfs_dbgmsg("spa=%s async request task=%u", spa->spa_name, task);
 	mutex_enter(&spa->spa_async_lock);
 	spa->spa_async_tasks |= task;
-	mutex_exit(&spa->spa_async_lock);
-}
-
-void
-spa_async_unrequest(spa_t *spa, int task)
-{
-	zfs_dbgmsg("spa=%s async unrequest task=%u", spa->spa_name, task);
-	mutex_enter(&spa->spa_async_lock);
-	spa->spa_async_tasks &= ~task;
 	mutex_exit(&spa->spa_async_lock);
 }
 
@@ -7884,9 +7851,8 @@ spa_sync_props(void *arg, dmu_tx_t *tx)
 				spa->spa_force_trim = intval;
 				break;
 			case ZPOOL_PROP_AUTOTRIM:
-				spa_async_request(spa, intval ?
-				    SPA_ASYNC_AUTO_TRIM_TASKQ_CREATE :
-				    SPA_ASYNC_AUTO_TRIM_TASKQ_DESTROY);
+				spa->spa_auto_trim = intval;
+				spa_async_request(spa, SPA_ASYNC_AUTOTRIM);
 				break;
 			case ZPOOL_PROP_AUTOEXPAND:
 				spa->spa_autoexpand = intval;
@@ -8229,67 +8195,6 @@ spa_sync_rewrite_vdev_config(spa_t *spa, dmu_tx_t *tx)
 }
 
 /*
- * Called from vdev_auto_trim when a vdev has completed its auto-trim
- * processing.
- */
-static void
-spa_vdev_auto_trim_done(spa_t *spa)
-{
-	mutex_enter(&spa->spa_auto_trim_lock);
-	VERIFY(spa->spa_num_auto_trimming > 0);
-	spa->spa_num_auto_trimming--;
-	if (spa->spa_num_auto_trimming == 0)
-		cv_broadcast(&spa->spa_auto_trim_done_cv);
-	mutex_exit(&spa->spa_auto_trim_lock);
-}
-
-/*
- * Dispatches all auto-trim processing to all top-level vdevs. This is
- * called from spa_sync once every txg.
- */
-static void
-spa_sync_auto_trim(spa_t *spa, uint64_t txg)
-{
-	ASSERT(spa_config_held(spa, SCL_CONFIG, RW_READER) == SCL_CONFIG);
-	ASSERT(!MUTEX_HELD(&spa->spa_auto_trim_lock));
-
-	/*
-	 * Another pool management task might be currently prevented from
-	 * starting and the current txg sync was invoked on its behalf,
-	 * so be prepared to postpone autotrim processing.
-	 */
-	if (!mutex_tryenter(&spa->spa_auto_trim_lock))
-		return;
-
-	/* Async start-up of the auto trim taskq may not yet have completed */
-	if (spa->spa_auto_trim_taskq == NULL) {
-		mutex_exit(&spa->spa_auto_trim_lock);
-		return;
-	}
-
-	/* Count the number of auto trim threads which will be launched below */
-	/* spa->spa_num_auto_trimming += spa->spa_root_vdev->vdev_children; */
-	for (uint64_t i = 0; i < spa->spa_root_vdev->vdev_children; i++) {
-		if (vdev_is_concrete(spa->spa_root_vdev->vdev_child[i]))
-			++spa->spa_num_auto_trimming;
-	}
-	mutex_exit(&spa->spa_auto_trim_lock);
-
-	for (uint64_t i = 0; i < spa->spa_root_vdev->vdev_children; i++) {
-		vdev_t *cvd = spa->spa_root_vdev->vdev_child[i];
-		if (!vdev_is_concrete(cvd))
-			continue;
-		vdev_trim_info_t *vti = kmem_zalloc(sizeof (*vti), KM_SLEEP);
-		vti->vti_vdev = cvd;
-		vti->vti_txg = txg;
-		vti->vti_done_cb = (void (*)(void *))spa_vdev_auto_trim_done;
-		vti->vti_done_arg = spa;
-		(void) taskq_dispatch(spa->spa_auto_trim_taskq,
-		    (void (*)(void *))vdev_auto_trim, vti, TQ_SLEEP);
-	}
-}
-
-/*
  * Sync the specified transaction group.  New blocks may be dirtied as
  * part of the process, so we iterate until it converges.
  */
@@ -8321,9 +8226,6 @@ spa_sync(spa_t *spa, uint64_t txg)
 		VERIFY0(avl_numnodes(&spa->spa_alloc_trees[i]));
 		mutex_exit(&spa->spa_alloc_locks[i]);
 	}
-
-	if (spa->spa_auto_trim == SPA_AUTO_TRIM_ON)
-		spa_sync_auto_trim(spa, txg);
 
 	/*
 	 * If there are any pending vdev state changes, convert them
