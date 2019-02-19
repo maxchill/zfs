@@ -205,6 +205,12 @@ int zfs_vdev_queue_depth_pct = 300;
  */
 int zfs_vdev_def_queue_depth = 32;
 
+/*
+ * Allow TRIM I/Os to be aggregated.  This should normally not be needed since
+ * TRIM I/O for extents up to zfs_trim_extent_bytes_max (128M) can be submitted
+ * by the TRIM code in zfs_trim.c.
+ */
+int zfs_vdev_aggregate_trim = 0;
 
 int
 vdev_queue_offset_compare(const void *x1, const void *x2)
@@ -579,9 +585,9 @@ vdev_queue_aggregate(vdev_queue_t *vq, zio_t *zio)
 
 	/*
 	 * While TRIM commands could be aggregated based on offset this
-	 * behavior is disable until it's determined to be beneficial.
+	 * behavior is disabled until it's determined to be beneficial.
 	 */
-	if (zio->io_type == ZIO_TYPE_TRIM)
+	if (zio->io_type == ZIO_TYPE_TRIM && !zfs_vdev_aggregate_trim)
 		return (NULL);
 
 	first = last = zio;
@@ -953,6 +959,9 @@ MODULE_PARM_DESC(zfs_vdev_aggregation_limit, "Max vdev I/O aggregation size");
 module_param(zfs_vdev_aggregation_limit_non_rotating, int, 0644);
 MODULE_PARM_DESC(zfs_vdev_aggregation_limit_non_rotating,
 	"Max vdev I/O aggregation size for non-rotating media");
+
+module_param(zfs_vdev_aggregate_trim, int, 0644);
+MODULE_PARM_DESC(zfs_vdev_aggregate_trim, "Allow TRIM I/O to be aggregated");
 
 module_param(zfs_vdev_read_gap_limit, int, 0644);
 MODULE_PARM_DESC(zfs_vdev_read_gap_limit, "Aggregate read I/O over gap");
