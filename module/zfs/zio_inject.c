@@ -124,7 +124,7 @@ freq_triggered(uint32_t frequency)
  * Returns true if the given record matches the I/O in progress.
  */
 static boolean_t
-zio_match_handler(const zbookmark_phys_t *zb, uint64_t type,
+zio_match_handler(const zbookmark_phys_t *zb, uint64_t type, int dva,
     zinject_record_t *record, int error)
 {
 	/*
@@ -141,6 +141,14 @@ zio_match_handler(const zbookmark_phys_t *zb, uint64_t type,
 	}
 
 	/*
+	 * If this record wants to inject errors into a particular DVA
+	 * ignore logical IOs and visa versa.
+	 */
+	if ((record->zi_dvas != 0 && dva == ZI_NO_DVA) ||
+	    (record->zi_dvas == 0 && dva != ZI_NO_DVA))
+		return (B_FALSE);
+
+	/*
 	 * Check for an exact match.
 	 */
 	if (zb->zb_objset == record->zi_objset &&
@@ -148,6 +156,7 @@ zio_match_handler(const zbookmark_phys_t *zb, uint64_t type,
 	    zb->zb_level == record->zi_level &&
 	    zb->zb_blkid >= record->zi_start &&
 	    zb->zb_blkid <= record->zi_end &&
+	    (record->zi_dvas == 0 || (record->zi_dvas & (1 << dva))) &&
 	    error == record->zi_error)
 		return (freq_triggered(record->zi_freq));
 
@@ -199,7 +208,8 @@ zio_handle_decrypt_injection(spa_t *spa, const zbookmark_phys_t *zb,
 		    handler->zi_record.zi_cmd != ZINJECT_DECRYPT_FAULT)
 			continue;
 
-		if (zio_match_handler(zb, type, &handler->zi_record, error)) {
+		if (zio_match_handler(zb, type, ZI_NO_DVA,
+		    &handler->zi_record, error)) {
 			ret = error;
 			break;
 		}
@@ -235,15 +245,40 @@ zio_handle_fault_injection(zio_t *zio, int error)
 
 	for (handler = list_head(&inject_handlers); handler != NULL;
 	    handler = list_next(&inject_handlers, handler)) {
+		int dva_i = ZI_NO_DVA;
+
+		/*
+		 * If this is a vdev child for a DVA, determine which DVA
+		 * it is for. We iterate backwards through the DVAs so that
+		 * we end up with dva_i = ZI_NO_DVA (-1) if we don't find
+		 * any matches.
+		 */
+		if (zio->io_bp != NULL && zio->io_vd != NULL &&
+		    zio->io_child_type == ZIO_CHILD_VDEV) {
+			for (dva_i = BP_GET_NDVAS(zio->io_bp) - 1; dva_i >= 0;
+			    dva_i--) {
+				dva_t *dva = &zio->io_bp->blk_dva[dva_i];
+				uint64_t off = DVA_GET_OFFSET(dva);
+				vdev_t *vd = vdev_lookup_top(zio->io_spa,
+				    DVA_GET_VDEV(dva));
+
+				/* compensate for vdev label added to leaves */
+				if (zio->io_vd->vdev_ops->vdev_op_leaf)
+					off += VDEV_LABEL_START_SIZE;
+
+				if (zio->io_vd == vd && zio->io_offset == off)
+					break;
+			}
+		}
 
 		if (zio->io_spa != handler->zi_spa ||
 		    handler->zi_record.zi_cmd != ZINJECT_DATA_FAULT)
 			continue;
 
-		/* If this handler matches, return EIO */
+		/* If this handler matches, return the specified error */
 		if (zio_match_handler(&zio->io_logical->io_bookmark,
 		    zio->io_bp ? BP_GET_TYPE(zio->io_bp) : DMU_OT_NONE,
-		    &handler->zi_record, error)) {
+		    dva_i, &handler->zi_record, error)) {
 			ret = error;
 			break;
 		}
