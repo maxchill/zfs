@@ -5902,6 +5902,7 @@ spa_vdev_add(spa_t *spa, nvlist_t *nvroot)
 	mutex_enter(&spa_namespace_lock);
 	spa_config_update(spa, SPA_CONFIG_UPDATE_POOL);
 	spa_event_notify(spa, NULL, NULL, ESC_ZFS_VDEV_ADD);
+	vdev_autotrim_restart(spa);
 	mutex_exit(&spa_namespace_lock);
 
 	return (0);

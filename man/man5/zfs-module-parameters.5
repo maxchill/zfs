@@ -1535,6 +1535,30 @@ Default value: \fB10\fR.
 .sp
 .ne 2
 .na
+\fBzfs_vdev_trim_max_active\fR (int)
+.ad
+.RS 12n
+Maximum trim/discard I/Os active to each device.
+See the section "ZFS I/O SCHEDULER".
+.sp
+Default value: \fB2\fR.
+.RE
+
+.sp
+.ne 2
+.na
+\fBzfs_vdev_trim_min_active\fR (int)
+.ad
+.RS 12n
+Minimum trim/discard I/Os active to each device.
+See the section "ZFS I/O SCHEDULER".
+.sp
+Default value: \fB1\fR.
+.RE
+
+.sp
+.ne 2
+.na
 \fBzfs_vdev_queue_depth_pct\fR (int)
 .ad
 .RS 12n

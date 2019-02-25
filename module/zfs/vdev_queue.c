@@ -157,7 +157,7 @@ uint32_t zfs_vdev_removal_max_active = 2;
 uint32_t zfs_vdev_initializing_min_active = 1;
 uint32_t zfs_vdev_initializing_max_active = 1;
 uint32_t zfs_vdev_trim_min_active = 1;
-uint32_t zfs_vdev_trim_max_active = 10;
+uint32_t zfs_vdev_trim_max_active = 2;
 
 /*
  * When the pool has less than zfs_vdev_async_write_active_min_dirty_percent
@@ -1029,6 +1029,14 @@ MODULE_PARM_DESC(zfs_vdev_sync_write_max_active,
 module_param(zfs_vdev_sync_write_min_active, int, 0644);
 MODULE_PARM_DESC(zfs_vdev_sync_write_min_active,
 	"Min active sync write I/Os per vdev");
+
+module_param(zfs_vdev_trim_max_active, int, 0644);
+MODULE_PARM_DESC(zfs_vdev_trim_max_active,
+	"Max active trim/discard I/Os per vdev");
+
+module_param(zfs_vdev_trim_min_active, int, 0644);
+MODULE_PARM_DESC(zfs_vdev_trim_min_active,
+	"Min active trim/discard I/Os per vdev");
 
 module_param(zfs_vdev_queue_depth_pct, int, 0644);
 MODULE_PARM_DESC(zfs_vdev_queue_depth_pct,

@@ -883,8 +883,10 @@ void
 vdev_free(vdev_t *vd)
 {
 	spa_t *spa = vd->vdev_spa;
+
 	ASSERT3P(vd->vdev_initialize_thread, ==, NULL);
 	ASSERT3P(vd->vdev_trim_thread, ==, NULL);
+	ASSERT3P(vd->vdev_autotrim_thread, ==, NULL);
 
 	/*
 	 * Scan queues are normally destroyed at the end of a scan. If the
@@ -915,9 +917,6 @@ vdev_free(vdev_t *vd)
 
 	ASSERT(vd->vdev_child == NULL);
 	ASSERT(vd->vdev_guid_sum == vd->vdev_guid);
-	ASSERT(vd->vdev_initialize_thread == NULL);
-	ASSERT(vd->vdev_trim_thread == NULL);
-	ASSERT(vd->vdev_autotrim_thread == NULL);
 
 	/*
 	 * Discard allocation state.
