@@ -1097,7 +1097,7 @@ typedef struct vdev_stat_ex {
  * Initialize functions.
  */
 typedef enum pool_initialize_func {
-	POOL_INITIALIZE_DO,
+	POOL_INITIALIZE_START,
 	POOL_INITIALIZE_CANCEL,
 	POOL_INITIALIZE_SUSPEND,
 	POOL_INITIALIZE_FUNCS
@@ -1107,7 +1107,7 @@ typedef enum pool_initialize_func {
  * TRIM functions.
  */
 typedef enum pool_trim_func {
-	POOL_TRIM_DO,
+	POOL_TRIM_START,
 	POOL_TRIM_CANCEL,
 	POOL_TRIM_SUSPEND,
 	POOL_TRIM_FUNCS

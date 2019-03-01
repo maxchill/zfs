@@ -544,11 +544,11 @@ zpool_do_initialize(int argc, char **argv)
 		{0, 0, 0, 0}
 	};
 
-	pool_initialize_func_t cmd_type = POOL_INITIALIZE_DO;
+	pool_initialize_func_t cmd_type = POOL_INITIALIZE_START;
 	while ((c = getopt_long(argc, argv, "cs", long_options, NULL)) != -1) {
 		switch (c) {
 		case 'c':
-			if (cmd_type != POOL_INITIALIZE_DO &&
+			if (cmd_type != POOL_INITIALIZE_START &&
 			    cmd_type != POOL_INITIALIZE_CANCEL) {
 				(void) fprintf(stderr, gettext("-c cannot be "
 				    "combined with other options\n"));
@@ -557,7 +557,7 @@ zpool_do_initialize(int argc, char **argv)
 			cmd_type = POOL_INITIALIZE_CANCEL;
 			break;
 		case 's':
-			if (cmd_type != POOL_INITIALIZE_DO &&
+			if (cmd_type != POOL_INITIALIZE_START &&
 			    cmd_type != POOL_INITIALIZE_SUSPEND) {
 				(void) fprintf(stderr, gettext("-s cannot be "
 				    "combined with other options\n"));
@@ -6783,7 +6783,7 @@ zpool_do_trim(int argc, char **argv)
 		{0, 0, 0, 0}
 	};
 
-	pool_trim_func_t cmd_type = POOL_TRIM_DO;
+	pool_trim_func_t cmd_type = POOL_TRIM_START;
 	uint64_t rate = 0;
 	boolean_t partial = B_FALSE;
 
@@ -6792,7 +6792,7 @@ zpool_do_trim(int argc, char **argv)
 	    != -1) {
 		switch (c) {
 		case 'c':
-			if (cmd_type != POOL_TRIM_DO &&
+			if (cmd_type != POOL_TRIM_START &&
 			    cmd_type != POOL_TRIM_CANCEL) {
 				(void) fprintf(stderr, gettext("-c cannot be "
 				    "combined with other options\n"));
@@ -6801,7 +6801,7 @@ zpool_do_trim(int argc, char **argv)
 			cmd_type = POOL_TRIM_CANCEL;
 			break;
 		case 'p':
-			if (cmd_type != POOL_TRIM_DO) {
+			if (cmd_type != POOL_TRIM_START) {
 				(void) fprintf(stderr, gettext("-p cannot be "
 				    "combined with the -c or -s options\n"));
 				usage(B_FALSE);
@@ -6809,7 +6809,7 @@ zpool_do_trim(int argc, char **argv)
 			partial = B_TRUE;
 			break;
 		case 'r':
-			if (cmd_type != POOL_TRIM_DO) {
+			if (cmd_type != POOL_TRIM_START) {
 				(void) fprintf(stderr, gettext("-r cannot be "
 				    "combined with the -c or -s options\n"));
 				usage(B_FALSE);
@@ -6821,7 +6821,7 @@ zpool_do_trim(int argc, char **argv)
 			}
 			break;
 		case 's':
-			if (cmd_type != POOL_TRIM_DO &&
+			if (cmd_type != POOL_TRIM_START &&
 			    cmd_type != POOL_TRIM_SUSPEND) {
 				(void) fprintf(stderr, gettext("-s cannot be "
 				    "combined with other options\n"));

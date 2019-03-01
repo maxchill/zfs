@@ -3878,7 +3878,7 @@ zfs_ioc_pool_initialize(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
 	}
 
 	if (!(cmd_type == POOL_INITIALIZE_CANCEL ||
-	    cmd_type == POOL_INITIALIZE_DO ||
+	    cmd_type == POOL_INITIALIZE_START ||
 	    cmd_type == POOL_INITIALIZE_SUSPEND)) {
 		return (SET_ERROR(EINVAL));
 	}
@@ -3954,7 +3954,7 @@ zfs_ioc_pool_trim(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
 		return (SET_ERROR(EINVAL));
 
 	if (!(cmd_type == POOL_TRIM_CANCEL ||
-	    cmd_type == POOL_TRIM_DO ||
+	    cmd_type == POOL_TRIM_START ||
 	    cmd_type == POOL_TRIM_SUSPEND)) {
 		return (SET_ERROR(EINVAL));
 	}

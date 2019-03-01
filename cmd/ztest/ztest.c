@@ -6482,7 +6482,7 @@ ztest_initialize(ztest_ds_t *zd, uint64_t id)
 			(void) printf("\n");
 		}
 		break;
-	case POOL_INITIALIZE_DO:
+	case POOL_INITIALIZE_START:
 		if (ztest_opts.zo_verbose >= 4) {
 			(void) printf("Start initialize %s", path);
 			if (active && error == 0)
@@ -6557,7 +6557,7 @@ ztest_trim(ztest_ds_t *zd, uint64_t id)
 			(void) printf("\n");
 		}
 		break;
-	case POOL_TRIM_DO:
+	case POOL_TRIM_START:
 		if (ztest_opts.zo_verbose >= 4) {
 			(void) printf("Start TRIM %s", path);
 			if (active && error == 0)
