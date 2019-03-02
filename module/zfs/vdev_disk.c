@@ -334,17 +334,22 @@ vdev_disk_open(vdev_t *v, uint64_t *psize, uint64_t *max_psize,
 		rw_exit(&vd->vd_lock);
 	}
 
+	struct request_queue *q = bdev_get_queue(vd->vd_bdev);
+
 	/*  Determine the physical block size */
 	block_size = vdev_bdev_block_size(vd->vd_bdev);
 
 	/* Clear the nowritecache bit, causes vdev_reopen() to try again. */
 	v->vdev_nowritecache = B_FALSE;
 
-	/* Set TRIM flag based on support reported by the underlying device. */
-	v->vdev_notrim = !blk_queue_discard(bdev_get_queue(vd->vd_bdev));
+	/* Set when device reports it supports TRIM. */
+	v->vdev_trim = !!blk_queue_discard(q);
+
+	/* Set when device reports it supports secure TRIM. */
+	v->vdev_securetrim = !!blk_queue_discard_secure(q);
 
 	/* Inform the ZIO pipeline that we are non-rotational */
-	v->vdev_nonrot = blk_queue_nonrot(bdev_get_queue(vd->vd_bdev));
+	v->vdev_nonrot = blk_queue_nonrot(q);
 
 	/* Physical volume size in bytes for the partition */
 	*psize = bdev_capacity(vd->vd_bdev);
@@ -732,6 +737,7 @@ vdev_disk_io_start(zio_t *zio)
 {
 	vdev_t *v = zio->io_vd;
 	vdev_disk_t *vd = v->vdev_tsd;
+	unsigned long trim_flags = 0;
 	int rw, flags, error;
 
 	/*
@@ -818,8 +824,14 @@ vdev_disk_io_start(zio_t *zio)
 		break;
 
 	case ZIO_TYPE_TRIM:
+#if defined(BLKDEV_DISCARD_SECURE)
+		if (zio->io_trim_flags & ZIO_TRIM_SECURE)
+			trim_flags |= BLKDEV_DISCARD_SECURE;
+#endif
 		zio->io_error = -blkdev_issue_discard(vd->vd_bdev,
-		    zio->io_offset >> 9, zio->io_size >> 9, GFP_NOFS, 0);
+		    zio->io_offset >> 9, zio->io_size >> 9, GFP_NOFS,
+		    trim_flags);
+
 		rw_exit(&vd->vd_lock);
 		zio_interrupt(zio);
 		return;
