@@ -175,7 +175,7 @@
 .Ar pool Ns ...
 .Nm
 .Cm trim
-.Op Fl p
+.Op Fl dp
 .Op Fl r Ar rate
 .Op Fl c | Fl s
 .Ar pool
@@ -2152,8 +2152,7 @@ resilver will be added to the new one.
 .It Xo
 .Nm
 .Cm trim
-.Op Fl p
-.Op Fl r Ar rate
+.Op Fl dp
 .Op Fl c | Fl s
 .Ar pool
 .Op Ar device Ns ...
@@ -2169,6 +2168,10 @@ pool property setting.  See the documentation for the
 .Sy autotrim
 property above for the types of vdev devices which can be trimmed.
 .Bl -tag -width Ds
+.It Fl d -secure
+Causes a secure TRIM to be initiated.  When performing a secure TRIM the
+device guarantees that data stored on the trimmed blocks has been erased.
+This requires support from the device and is not supported by all SSDs.
 .It Fl p -partial
 Causes a partial TRIM to be initiated.  When performing a partial TRIM only
 space which has been previously allocated, and then freed, will be trimmed.

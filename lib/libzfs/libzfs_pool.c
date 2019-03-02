@@ -2265,7 +2265,7 @@ zpool_trim(zpool_handle_t *zhp, pool_trim_func_t cmd_type, nvlist_t *vds,
 	if (err == 0) {
 		err = lzc_trim(zhp->zpool_name, cmd_type,
 		    trim_flags->rate, trim_flags->partial,
-		    vdev_guids, &errlist);
+		    trim_flags->secure, vdev_guids, &errlist);
 		if (err == 0) {
 			fnvlist_free(vdev_guids);
 			fnvlist_free(guids_to_paths);
