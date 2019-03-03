@@ -343,10 +343,10 @@ vdev_disk_open(vdev_t *v, uint64_t *psize, uint64_t *max_psize,
 	v->vdev_nowritecache = B_FALSE;
 
 	/* Set when device reports it supports TRIM. */
-	v->vdev_trim = !!blk_queue_discard(q);
+	v->vdev_has_trim = !!blk_queue_discard(q);
 
 	/* Set when device reports it supports secure TRIM. */
-	v->vdev_securetrim = !!blk_queue_discard_secure(q);
+	v->vdev_has_securetrim = !!blk_queue_discard_secure(q);
 
 	/* Inform the ZIO pipeline that we are non-rotational */
 	v->vdev_nonrot = blk_queue_nonrot(q);

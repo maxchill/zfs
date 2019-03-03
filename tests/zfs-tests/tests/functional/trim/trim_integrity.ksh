@@ -79,7 +79,7 @@ for type in "" "mirror" "raidz" "raidz2" "raidz3"; do
 	log_must zpool trim $TESTPOOL
 	wait_trim $TESTPOOL $TRIM_VDEVS
 
-	verify_trim_io $TESTPOOL "ind" 100
+	verify_trim_io $TESTPOOL "ind" 10
 	verify_pool $TESTPOOL
 
 	log_must zpool destroy $TESTPOOL
