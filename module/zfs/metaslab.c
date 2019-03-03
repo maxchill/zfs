@@ -4729,10 +4729,10 @@ metaslab_disable(metaslab_t *msp)
 }
 
 void
-metaslab_enable(spa_t *spa, metaslab_t *msp, boolean_t sync)
+metaslab_enable(metaslab_t *msp, boolean_t sync)
 {
-	ASSERT(!MUTEX_HELD(&msp->ms_lock));
 	metaslab_group_t *mg = msp->ms_group;
+	spa_t *spa = mg->mg_vd->vdev_spa;
 
 	/*
 	 * Wait for the outstanding IO to be synced to prevent newly
@@ -4740,7 +4740,7 @@ metaslab_enable(spa_t *spa, metaslab_t *msp, boolean_t sync)
 	 * initialize and TRIM which are modifying unallocated space.
 	 */
 	if (sync)
-		txg_wait_synced(spa->spa_dsl_pool, 0);
+		txg_wait_synced(spa_get_dsl(spa), 0);
 
 	mutex_enter(&mg->mg_ms_disabled_lock);
 	mutex_enter(&msp->ms_lock);
