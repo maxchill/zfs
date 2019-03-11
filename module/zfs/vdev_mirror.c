@@ -406,10 +406,6 @@ vdev_mirror_child_done(zio_t *zio)
 {
 	mirror_child_t *mc = zio->io_private;
 
-	/* inject any DVA errors requested by zinject */
-	if (zio_injection_enabled && zio->io_error == 0)
-		zio->io_error = zio_handle_fault_injection(zio, EIO);
-
 	mc->mc_error = zio->io_error;
 	mc->mc_tried = 1;
 	mc->mc_skipped = 0;
@@ -419,10 +415,6 @@ static void
 vdev_mirror_scrub_done(zio_t *zio)
 {
 	mirror_child_t *mc = zio->io_private;
-
-	/* inject any DVA errors requested by zinject */
-	if (zio_injection_enabled && zio->io_error == 0)
-		zio->io_error = zio_handle_fault_injection(zio, EIO);
 
 	if (zio->io_error == 0) {
 		zio_t *pio;
