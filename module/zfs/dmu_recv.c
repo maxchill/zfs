@@ -1235,11 +1235,13 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
 		 * processed. However, for raw receives we manually set the
 		 * maxblkid from the drr_maxblkid and so we must first free
 		 * everything above that blkid to ensure the DMU is always
-		 * consistent with itself.
+		 * consistent with itself. We will never free the first block
+		 * of the object here because a maxblkid of 0 could indicate
+		 * an object with a single block or one with no blocks.
 		 */
-		if (rwa->raw) {
+		if (rwa->raw && object != DMU_NEW_OBJECT) {
 			err = dmu_free_long_range(rwa->os, drro->drr_object,
-			    (drro->drr_maxblkid + 1) * drro->drr_blksz,
+			    (drro->drr_maxblkid + 1) * doi.doi_data_block_size,
 			    DMU_OBJECT_END);
 			if (err != 0)
 				return (SET_ERROR(EINVAL));
@@ -1253,7 +1255,12 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
 		 * earlier in the stream.
 		 */
 		txg_wait_synced(dmu_objset_pool(rwa->os), 0);
-		object = drro->drr_object;
+
+		if (dmu_object_info(rwa->os, drro->drr_object, NULL) != ENOENT)
+			return (SET_ERROR(EINVAL));
+
+		/* object was freed and we are about to allocate a new one */
+		object = DMU_NEW_OBJECT;
 	} else {
 		/* object is free and we are about to allocate a new one */
 		object = DMU_NEW_OBJECT;
@@ -1280,7 +1287,6 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
 				return (err);
 
 			err = dmu_free_long_object(rwa->os, slot);
-
 			if (err != 0)
 				return (err);
 
@@ -1316,6 +1322,7 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
 		    drro->drr_bonustype, drro->drr_bonuslen,
 		    dn_slots << DNODE_SHIFT, tx);
 	}
+
 	if (err != 0) {
 		dmu_tx_commit(tx);
 		return (SET_ERROR(EINVAL));
@@ -1375,11 +1382,8 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
 		    drro->drr_nlevels, tx));
 
 		/*
-		 * Set the maxblkid. We will never free the first block of
-		 * an object here because a maxblkid of 0 could indicate
-		 * an object with a single block or one with no blocks.
-		 * This will always succeed because we freed all blocks
-		 * beyond the new maxblkid above.
+		 * Set the maxblkid. This will always succeed because
+		 * we freed all blocks beyond the new maxblkid above.
 		 */
 		VERIFY0(dmu_object_set_maxblkid(rwa->os, drro->drr_object,
 		    drro->drr_maxblkid, tx));

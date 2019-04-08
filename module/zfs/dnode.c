@@ -59,6 +59,7 @@ dnode_stats_t dnode_stats = {
 	{ "dnode_free_interior_lock_retry",	KSTAT_DATA_UINT64 },
 	{ "dnode_allocate",			KSTAT_DATA_UINT64 },
 	{ "dnode_reallocate",			KSTAT_DATA_UINT64 },
+	{ "dnode_reallocate_dbuf",		KSTAT_DATA_UINT64 },
 	{ "dnode_buf_evict",			KSTAT_DATA_UINT64 },
 	{ "dnode_alloc_next_chunk",		KSTAT_DATA_UINT64 },
 	{ "dnode_alloc_race",			KSTAT_DATA_UINT64 },
@@ -83,6 +84,7 @@ int zfs_default_ibs = DN_MAX_INDBLKSHIFT;
 #ifdef	_KERNEL
 static kmem_cbrc_t dnode_move(void *, void *, size_t, void *);
 #endif /* _KERNEL */
+static int dnode_set_blksz_impl(dnode_t *, uint64_t, int, dmu_tx_t *);
 
 static int
 dbuf_compare(const void *x1, const void *x2)
@@ -415,7 +417,7 @@ dnode_rm_spill(dnode_t *dn, dmu_tx_t *tx)
 	ASSERT3U(zfs_refcount_count(&dn->dn_holds), >=, 1);
 	ASSERT(RW_WRITE_HELD(&dn->dn_struct_rwlock));
 	dnode_setdirty(dn, tx);
-	dn->dn_rm_spillblk[tx->tx_txg&TXG_MASK] = DN_KILL_SPILLBLK;
+	dn->dn_rm_spillblk[tx->tx_txg & TXG_MASK] = DN_KILL_SPILLBLK;
 	dn->dn_have_spill = B_FALSE;
 }
 
@@ -658,11 +660,11 @@ dnode_allocate(dnode_t *dn, dmu_object_type_t ot, int blocksize, int ibs,
 	dn->dn_next_blksz[tx->tx_txg & TXG_MASK] = dn->dn_datablksz;
 }
 
-void
+int
 dnode_reallocate(dnode_t *dn, dmu_object_type_t ot, int blocksize,
     dmu_object_type_t bonustype, int bonuslen, int dn_slots, dmu_tx_t *tx)
 {
-	int nblkptr;
+	int err, nblkptr;
 
 	ASSERT3U(blocksize, >=, SPA_MINBLOCKSIZE);
 	ASSERT3U(blocksize, <=,
@@ -689,15 +691,26 @@ dnode_reallocate(dnode_t *dn, dmu_object_type_t ot, int blocksize,
 	rw_enter(&dn->dn_struct_rwlock, RW_WRITER);
 	dnode_setdirty(dn, tx);
 	if (dn->dn_datablksz != blocksize) {
-		/* change blocksize */
-		ASSERT(dn->dn_maxblkid == 0 &&
-		    (BP_IS_HOLE(&dn->dn_phys->dn_blkptr[0]) ||
-		    dnode_block_freed(dn, 0)));
-		dnode_setdblksz(dn, blocksize);
-		dn->dn_next_blksz[tx->tx_txg&TXG_MASK] = blocksize;
+		ASSERT0(dn->dn_maxblkid);
+		ASSERT(BP_IS_HOLE(&dn->dn_phys->dn_blkptr[0]) ||
+		    dnode_block_freed(dn, 0));
+
+		/*
+		 * dnode_evict_dbufs() will have cleaned up all unreferenced
+		 * dbufs above.  This should never fail as long as the dnode
+		 * being reallocated is not in use.
+		 */
+		err = dnode_set_blksz_impl(dn, blocksize, 0, tx);
+		if (err) {
+			if (err == EBUSY)
+				DNODE_STAT_BUMP(dnode_reallocate_dbuf);
+
+			rw_exit(&dn->dn_struct_rwlock);
+			return (err);
+		}
 	}
 	if (dn->dn_bonuslen != bonuslen)
-		dn->dn_next_bonuslen[tx->tx_txg&TXG_MASK] = bonuslen;
+		dn->dn_next_bonuslen[tx->tx_txg & TXG_MASK] = bonuslen;
 
 	if (bonustype == DMU_OT_SA) /* Maximize bonus space for SA */
 		nblkptr = 1;
@@ -706,13 +719,14 @@ dnode_reallocate(dnode_t *dn, dmu_object_type_t ot, int blocksize,
 		    1 + ((DN_SLOTS_TO_BONUSLEN(dn_slots) - bonuslen) >>
 		    SPA_BLKPTRSHIFT));
 	if (dn->dn_bonustype != bonustype)
-		dn->dn_next_bonustype[tx->tx_txg&TXG_MASK] = bonustype;
+		dn->dn_next_bonustype[tx->tx_txg & TXG_MASK] = bonustype;
 	if (dn->dn_nblkptr != nblkptr)
-		dn->dn_next_nblkptr[tx->tx_txg&TXG_MASK] = nblkptr;
+		dn->dn_next_nblkptr[tx->tx_txg & TXG_MASK] = nblkptr;
 	if (dn->dn_phys->dn_flags & DNODE_FLAG_SPILL_BLKPTR) {
 		dbuf_rm_spill(dn, tx);
 		dnode_rm_spill(dn, tx);
 	}
+
 	rw_exit(&dn->dn_struct_rwlock);
 
 	/* change type */
@@ -738,6 +752,8 @@ dnode_reallocate(dnode_t *dn, dmu_object_type_t ot, int blocksize,
 
 	dn->dn_allocated_txg = tx->tx_txg;
 	mutex_exit(&dn->dn_mtx);
+
+	return (0);
 }
 
 #ifdef	_KERNEL
@@ -1654,9 +1670,9 @@ dnode_setdirty(dnode_t *dn, dmu_tx_t *tx)
 	ASSERT(!zfs_refcount_is_zero(&dn->dn_holds) ||
 	    !avl_is_empty(&dn->dn_dbufs));
 	ASSERT(dn->dn_datablksz != 0);
-	ASSERT0(dn->dn_next_bonuslen[txg&TXG_MASK]);
-	ASSERT0(dn->dn_next_blksz[txg&TXG_MASK]);
-	ASSERT0(dn->dn_next_bonustype[txg&TXG_MASK]);
+	ASSERT0(dn->dn_next_bonuslen[txg & TXG_MASK]);
+	ASSERT0(dn->dn_next_blksz[txg & TXG_MASK]);
+	ASSERT0(dn->dn_next_bonustype[txg & TXG_MASK]);
 
 	dprintf_ds(os->os_dsl_dataset, "obj=%llu txg=%llu\n",
 	    dn->dn_object, txg);
@@ -1699,12 +1715,13 @@ dnode_free(dnode_t *dn, dmu_tx_t *tx)
  * Try to change the block size for the indicated dnode.  This can only
  * succeed if there are no blocks allocated or dirty beyond first block
  */
-int
-dnode_set_blksz(dnode_t *dn, uint64_t size, int ibs, dmu_tx_t *tx)
+static int
+dnode_set_blksz_impl(dnode_t *dn, uint64_t size, int ibs, dmu_tx_t *tx)
 {
 	dmu_buf_impl_t *db;
 	int err;
 
+	ASSERT(RW_WRITE_HELD(&dn->dn_struct_rwlock));
 	ASSERT3U(size, <=, spa_maxblocksize(dmu_objset_spa(dn->dn_objset)));
 	if (size == 0)
 		size = SPA_MINBLOCKSIZE;
@@ -1717,11 +1734,9 @@ dnode_set_blksz(dnode_t *dn, uint64_t size, int ibs, dmu_tx_t *tx)
 	if (size >> SPA_MINBLOCKSHIFT == dn->dn_datablkszsec && ibs == 0)
 		return (0);
 
-	rw_enter(&dn->dn_struct_rwlock, RW_WRITER);
-
 	/* Check for any allocated blocks beyond the first */
 	if (dn->dn_maxblkid != 0)
-		goto fail;
+		return (SET_ERROR(ENOTSUP));
 
 	mutex_enter(&dn->dn_dbufs_mtx);
 	for (db = avl_first(&dn->dn_dbufs); db != NULL;
@@ -1729,38 +1744,46 @@ dnode_set_blksz(dnode_t *dn, uint64_t size, int ibs, dmu_tx_t *tx)
 		if (db->db_blkid != 0 && db->db_blkid != DMU_BONUS_BLKID &&
 		    db->db_blkid != DMU_SPILL_BLKID) {
 			mutex_exit(&dn->dn_dbufs_mtx);
-			goto fail;
+			return (SET_ERROR(EBUSY));
 		}
 	}
 	mutex_exit(&dn->dn_dbufs_mtx);
 
 	if (ibs && dn->dn_nlevels != 1)
-		goto fail;
+		return (SET_ERROR(ENOTSUP));
 
 	/* resize the old block */
 	err = dbuf_hold_impl(dn, 0, 0, TRUE, FALSE, FTAG, &db);
 	if (err == 0)
 		dbuf_new_size(db, size, tx);
 	else if (err != ENOENT)
-		goto fail;
+		return (SET_ERROR(ENOTSUP));
 
 	dnode_setdblksz(dn, size);
 	dnode_setdirty(dn, tx);
-	dn->dn_next_blksz[tx->tx_txg&TXG_MASK] = size;
+	dn->dn_next_blksz[tx->tx_txg & TXG_MASK] = size;
 	if (ibs) {
 		dn->dn_indblkshift = ibs;
-		dn->dn_next_indblkshift[tx->tx_txg&TXG_MASK] = ibs;
+		dn->dn_next_indblkshift[tx->tx_txg & TXG_MASK] = ibs;
 	}
+
 	/* rele after we have fixed the blocksize in the dnode */
 	if (db)
 		dbuf_rele(db, FTAG);
 
-	rw_exit(&dn->dn_struct_rwlock);
 	return (0);
+}
 
-fail:
+int
+dnode_set_blksz(dnode_t *dn, uint64_t size, int ibs, dmu_tx_t *tx)
+{
+	int err;
+
+	rw_enter(&dn->dn_struct_rwlock, RW_WRITER);
+	err = dnode_set_blksz_impl(dn, size, ibs, tx);
 	rw_exit(&dn->dn_struct_rwlock);
-	return (SET_ERROR(ENOTSUP));
+
+	return (err);
 }
 
 static void

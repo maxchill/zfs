@@ -419,7 +419,7 @@ void dnode_setdirty(dnode_t *dn, dmu_tx_t *tx);
 void dnode_sync(dnode_t *dn, dmu_tx_t *tx);
 void dnode_allocate(dnode_t *dn, dmu_object_type_t ot, int blocksize, int ibs,
     dmu_object_type_t bonustype, int bonuslen, int dn_slots, dmu_tx_t *tx);
-void dnode_reallocate(dnode_t *dn, dmu_object_type_t ot, int blocksize,
+int dnode_reallocate(dnode_t *dn, dmu_object_type_t ot, int blocksize,
     dmu_object_type_t bonustype, int bonuslen, int dn_slots, dmu_tx_t *tx);
 void dnode_free(dnode_t *dn, dmu_tx_t *tx);
 void dnode_byteswap(dnode_phys_t *dnp);
@@ -549,6 +549,10 @@ typedef struct dnode_stats {
 	 * Number of dnodes re-allocated by dnode_reallocate().
 	 */
 	kstat_named_t dnode_reallocate;
+	/*
+	 * Number of dnodes failed to be re-allocated due to a held dbuf.
+	 */
+	kstat_named_t dnode_reallocate_dbuf;
 	/*
 	 * Number of meta dnode dbufs evicted.
 	 */

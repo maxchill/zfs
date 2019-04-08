@@ -327,7 +327,8 @@ dmu_object_reclaim_dnsize(objset_t *os, uint64_t object, dmu_object_type_t ot,
 	if (err)
 		return (err);
 
-	dnode_reallocate(dn, ot, blocksize, bonustype, bonuslen, dn_slots, tx);
+	err = dnode_reallocate(dn, ot, blocksize, bonustype, bonuslen,
+	    dn_slots, tx);
 
 	dnode_rele(dn, FTAG);
 	return (err);
