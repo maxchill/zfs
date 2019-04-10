@@ -39,6 +39,7 @@ dist_pkgdata_SCRIPTS = \
 	send-c_volume.ksh \
 	send-c_zstreamdump.ksh \
 	send-cpL_varied_recsize.ksh \
+	send_encrypted_truncated_files.ksh \
 	send_freeobjects.ksh \
 	send_realloc_dnode_size.ksh \
 	send_holds.ksh \
