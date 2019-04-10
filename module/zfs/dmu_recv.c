@@ -1110,6 +1110,33 @@ save_resume_state(struct receive_writer_arg *rwa,
 	rwa->os->os_dsl_dataset->ds_resume_bytes[txgoff] = rwa->bytes_read;
 }
 
+static void
+print_dbufs(objset_t *os, uint64_t object)
+{
+	dnode_t *dn;
+	int err;
+
+	err = dnode_hold_impl(os, object, DNODE_MUST_BE_ALLOCATED, 0,
+	    FTAG, &dn);
+	if (err) {
+		zfs_dbgmsg("dnode_hold_impl() = %d", err);
+		return;
+	}
+
+	mutex_enter(&dn->dn_dbufs_mtx);
+	dmu_buf_impl_t *db;
+
+	for (db = avl_first(&dn->dn_dbufs); db != NULL;
+	    db = AVL_NEXT(&dn->dn_dbufs, db)) {
+		zfs_dbgmsg("object=%llu blkid=%llu", object, db->db_blkid);
+	}
+	mutex_exit(&dn->dn_dbufs_mtx);
+
+	dnode_rele(dn, FTAG);
+
+	return;
+}
+
 noinline static int
 receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
     void *data)
@@ -1203,6 +1230,11 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
 		    drro->drr_nlevels < doi.doi_indirection))) {
 			err = dmu_free_long_range(rwa->os,
 			    drro->drr_object, 0, DMU_OBJECT_END);
+
+			zfs_dbgmsg("A dmu_free_long_range() object=%llu "
+			    "err=%d", (u_longlong_t) drro->drr_object, err);
+			print_dbufs(rwa->os, drro->drr_object);
+
 			if (err != 0)
 				return (SET_ERROR(EINVAL));
 		}
@@ -1224,6 +1256,9 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
 			if (err != 0)
 				return (SET_ERROR(EINVAL));
 
+			zfs_dbgmsg("B dmu_free_long_object() object=%llu "
+			    "err=%d", (u_longlong_t) drro->drr_object, err);
+
 			txg_wait_synced(dmu_objset_pool(rwa->os), 0);
 			object = DMU_NEW_OBJECT;
 		}
@@ -1235,12 +1270,22 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
 		 * processed. However, for raw receives we manually set the
 		 * maxblkid from the drr_maxblkid and so we must first free
 		 * everything above that blkid to ensure the DMU is always
-		 * consistent with itself.
+		 * consistent with itself. We will never free the first block
+		 * of the object here because a maxblkid of 0 could indicate
+		 * an object with a single block or one with no blocks.
 		 */
-		if (rwa->raw) {
+		if (rwa->raw && object != DMU_NEW_OBJECT) {
 			err = dmu_free_long_range(rwa->os, drro->drr_object,
-			    (drro->drr_maxblkid + 1) * drro->drr_blksz,
+			    (drro->drr_maxblkid + 1) * doi.doi_data_block_size,
 			    DMU_OBJECT_END);
+
+			zfs_dbgmsg("C dmu_free_long_range() object=%llu "
+			    "offset=%llu size=%llu err=%d",
+			    (u_longlong_t) drro->drr_object,
+			    (u_longlong_t) (drro->drr_maxblkid + 1) *
+			    doi.doi_data_block_size,
+			    DMU_OBJECT_END, err);
+
 			if (err != 0)
 				return (SET_ERROR(EINVAL));
 		}
@@ -1292,6 +1337,7 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
 			need_sync = B_TRUE;
 		}
 
+		zfs_dbgmsg("need_sync=%d", need_sync);
 		if (need_sync)
 			txg_wait_synced(dmu_objset_pool(rwa->os), 0);
 	}
@@ -1380,11 +1426,8 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
 		    drro->drr_nlevels, tx));
 
 		/*
-		 * Set the maxblkid. We will never free the first block of
-		 * an object here because a maxblkid of 0 could indicate
-		 * an object with a single block or one with no blocks.
-		 * This will always succeed because we freed all blocks
-		 * beyond the new maxblkid above.
+		 * Set the maxblkid. This will always succeed because
+		 * we freed all blocks beyond the new maxblkid above.
 		 */
 		VERIFY0(dmu_object_set_maxblkid(rwa->os, drro->drr_object,
 		    drro->drr_maxblkid, tx));
@@ -2168,9 +2211,9 @@ dprintf_drr(struct receive_record_arg *rrd, int err)
 	case DRR_OBJECT:
 	{
 		struct drr_object *drro = &rrd->header.drr_u.drr_object;
-		dprintf("drr_type = OBJECT obj = %llu type = %u "
+	zfs_dbgmsg("drr_type = OBJECT obj = %llu type = %u "
 		    "bonustype = %u blksz = %u bonuslen = %u cksumtype = %u "
-		    "compress = %u dn_slots = %u err = %d\n",
+		    "compress = %u dn_slots = %u err = %d",
 		    drro->drr_object, drro->drr_type,  drro->drr_bonustype,
 		    drro->drr_blksz, drro->drr_bonuslen,
 		    drro->drr_checksumtype, drro->drr_compress,
@@ -2181,17 +2224,17 @@ dprintf_drr(struct receive_record_arg *rrd, int err)
 	{
 		struct drr_freeobjects *drrfo =
 		    &rrd->header.drr_u.drr_freeobjects;
-		dprintf("drr_type = FREEOBJECTS firstobj = %llu "
-		    "numobjs = %llu err = %d\n",
+	zfs_dbgmsg("drr_type = FREEOBJECTS firstobj = %llu "
+		    "numobjs = %llu err = %d",
 		    drrfo->drr_firstobj, drrfo->drr_numobjs, err);
 		break;
 	}
 	case DRR_WRITE:
 	{
 		struct drr_write *drrw = &rrd->header.drr_u.drr_write;
-		dprintf("drr_type = WRITE obj = %llu type = %u offset = %llu "
+	zfs_dbgmsg("drr_type = WRITE obj = %llu type = %u offset = %llu "
 		    "lsize = %llu cksumtype = %u flags = %u "
-		    "compress = %u psize = %llu err = %d\n",
+		    "compress = %u psize = %llu err = %d",
 		    drrw->drr_object, drrw->drr_type, drrw->drr_offset,
 		    drrw->drr_logical_size, drrw->drr_checksumtype,
 		    drrw->drr_flags, drrw->drr_compressiontype,
@@ -2202,10 +2245,10 @@ dprintf_drr(struct receive_record_arg *rrd, int err)
 	{
 		struct drr_write_byref *drrwbr =
 		    &rrd->header.drr_u.drr_write_byref;
-		dprintf("drr_type = WRITE_BYREF obj = %llu offset = %llu "
+	zfs_dbgmsg("drr_type = WRITE_BYREF obj = %llu offset = %llu "
 		    "length = %llu toguid = %llx refguid = %llx "
 		    "refobject = %llu refoffset = %llu cksumtype = %u "
-		    "flags = %u err = %d\n",
+		    "flags = %u err = %d",
 		    drrwbr->drr_object, drrwbr->drr_offset,
 		    drrwbr->drr_length, drrwbr->drr_toguid,
 		    drrwbr->drr_refguid, drrwbr->drr_refobject,
@@ -2217,9 +2260,9 @@ dprintf_drr(struct receive_record_arg *rrd, int err)
 	{
 		struct drr_write_embedded *drrwe =
 		    &rrd->header.drr_u.drr_write_embedded;
-		dprintf("drr_type = WRITE_EMBEDDED obj = %llu offset = %llu "
+	zfs_dbgmsg("drr_type = WRITE_EMBEDDED obj = %llu offset = %llu "
 		    "length = %llu compress = %u etype = %u lsize = %u "
-		    "psize = %u err = %d\n",
+		    "psize = %u err = %d",
 		    drrwe->drr_object, drrwe->drr_offset, drrwe->drr_length,
 		    drrwe->drr_compression, drrwe->drr_etype,
 		    drrwe->drr_lsize, drrwe->drr_psize, err);
@@ -2228,8 +2271,8 @@ dprintf_drr(struct receive_record_arg *rrd, int err)
 	case DRR_FREE:
 	{
 		struct drr_free *drrf = &rrd->header.drr_u.drr_free;
-		dprintf("drr_type = FREE obj = %llu offset = %llu "
-		    "length = %lld err = %d\n",
+	zfs_dbgmsg("drr_type = FREE obj = %llu offset = %llu "
+		    "length = %lld err = %d",
 		    drrf->drr_object, drrf->drr_offset, drrf->drr_length,
 		    err);
 		break;
@@ -2237,16 +2280,16 @@ dprintf_drr(struct receive_record_arg *rrd, int err)
 	case DRR_SPILL:
 	{
 		struct drr_spill *drrs = &rrd->header.drr_u.drr_spill;
-		dprintf("drr_type = SPILL obj = %llu length = %llu "
-		    "err = %d\n", drrs->drr_object, drrs->drr_length, err);
+	zfs_dbgmsg("drr_type = SPILL obj = %llu length = %llu "
+		    "err = %d", drrs->drr_object, drrs->drr_length, err);
 		break;
 	}
 	case DRR_OBJECT_RANGE:
 	{
 		struct drr_object_range *drror =
 		    &rrd->header.drr_u.drr_object_range;
-		dprintf("drr_type = OBJECT_RANGE firstobj = %llu "
-		    "numslots = %llu flags = %u err = %d\n",
+	zfs_dbgmsg("drr_type = OBJECT_RANGE firstobj = %llu "
+		    "numslots = %llu flags = %u err = %d",
 		    drror->drr_firstobj, drror->drr_numslots,
 		    drror->drr_flags, err);
 		break;
@@ -2341,8 +2384,7 @@ receive_process_record(struct receive_writer_arg *rwa,
 		err = (SET_ERROR(EINVAL));
 	}
 
-	if (err != 0)
-		dprintf_drr(rrd, err);
+	dprintf_drr(rrd, err);
 
 	return (err);
 }

@@ -1889,6 +1889,14 @@ dbuf_dirty(dmu_buf_impl_t *db, dmu_tx_t *tx)
 
 	DB_DNODE_ENTER(db);
 	dn = DB_DNODE(db);
+
+	if (dn->dn_object == 264) {
+		cmn_err(CE_WARN, "HERE3: %d\n",  db->db_blkid);
+#ifdef _KERNEL
+		dump_stack();
+#endif
+	}
+
 	/*
 	 * Shouldn't dirty a regular buffer in syncing context.  Private
 	 * objects may be dirtied in syncing context, but only if they

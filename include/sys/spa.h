@@ -1182,6 +1182,8 @@ extern unsigned long zfs_deadman_synctime_ms;
 extern unsigned long zfs_deadman_ziotime_ms;
 extern unsigned long zfs_deadman_checktime_ms;
 
+void bookmark_to_name(zbookmark_phys_t *zb, char *buf, size_t len);
+
 #ifdef	__cplusplus
 }
 #endif

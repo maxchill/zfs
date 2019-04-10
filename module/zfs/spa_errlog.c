@@ -58,7 +58,7 @@
 /*
  * Convert a bookmark to a string.
  */
-static void
+void
 bookmark_to_name(zbookmark_phys_t *zb, char *buf, size_t len)
 {
 	(void) snprintf(buf, len, "%llx:%llx:%llx:%llx",

@@ -1726,6 +1726,19 @@ dmu_assign_arcbuf_by_dnode(dnode_t *dn, uint64_t offset, arc_buf_t *buf,
 		return (SET_ERROR(EIO));
 	rw_exit(&dn->dn_struct_rwlock);
 
+	zfs_dbgmsg(
+	    "object=%llu %llu %llu, %llu, %llu, %llu",
+	    (u_longlong_t) dn->dn_object,
+	    (u_longlong_t) offset, (u_longlong_t) db->db.db_offset,
+	    (u_longlong_t) blksz, (u_longlong_t) db->db.db_size);
+
+	if (dn->dn_object == 264) {
+		cmn_err(CE_WARN,
+		    "HERE2: %llu, %llu, %llu, %llu\n",
+		    (u_longlong_t) offset, (u_longlong_t) db->db.db_offset,
+		    (u_longlong_t) blksz, (u_longlong_t) db->db.db_size);
+	}
+
 	/*
 	 * We can only assign if the offset is aligned, the arc buf is the
 	 * same size as the dbuf, and the dbuf is not metadata.
@@ -1737,6 +1750,7 @@ dmu_assign_arcbuf_by_dnode(dnode_t *dn, uint64_t offset, arc_buf_t *buf,
 		/* compressed bufs must always be assignable to their dbuf */
 		ASSERT3U(arc_get_compression(buf), ==, ZIO_COMPRESS_OFF);
 		ASSERT(!(buf->b_flags & ARC_BUF_FLAG_COMPRESSED));
+		ASSERT(!arc_is_encrypted(buf));
 
 		dbuf_rele(db, FTAG);
 		dmu_write(os, object, offset, blksz, buf->b_data, tx);

@@ -83,6 +83,7 @@ int zfs_default_ibs = DN_MAX_INDBLKSHIFT;
 #ifdef	_KERNEL
 static kmem_cbrc_t dnode_move(void *, void *, size_t, void *);
 #endif /* _KERNEL */
+static int dnode_set_blksz_impl(dnode_t *, uint64_t, int, dmu_tx_t *);
 
 static int
 dbuf_compare(const void *x1, const void *x2)
@@ -693,8 +694,10 @@ dnode_reallocate(dnode_t *dn, dmu_object_type_t ot, int blocksize,
 		ASSERT(dn->dn_maxblkid == 0 &&
 		    (BP_IS_HOLE(&dn->dn_phys->dn_blkptr[0]) ||
 		    dnode_block_freed(dn, 0)));
-		dnode_setdblksz(dn, blocksize);
-		dn->dn_next_blksz[tx->tx_txg&TXG_MASK] = blocksize;
+		int err = dnode_set_blksz_impl(dn, blocksize, 0, tx);
+		if (err) {
+			zfs_dbgmsg("dnode_set_blksz_impl() = %d", err);
+		}
 	}
 	if (dn->dn_bonuslen != bonuslen)
 		dn->dn_next_bonuslen[tx->tx_txg&TXG_MASK] = bonuslen;
@@ -1699,8 +1702,8 @@ dnode_free(dnode_t *dn, dmu_tx_t *tx)
  * Try to change the block size for the indicated dnode.  This can only
  * succeed if there are no blocks allocated or dirty beyond first block
  */
-int
-dnode_set_blksz(dnode_t *dn, uint64_t size, int ibs, dmu_tx_t *tx)
+static int
+dnode_set_blksz_impl(dnode_t *dn, uint64_t size, int ibs, dmu_tx_t *tx)
 {
 	dmu_buf_impl_t *db;
 	int err;
@@ -1717,11 +1720,9 @@ dnode_set_blksz(dnode_t *dn, uint64_t size, int ibs, dmu_tx_t *tx)
 	if (size >> SPA_MINBLOCKSHIFT == dn->dn_datablkszsec && ibs == 0)
 		return (0);
 
-	rw_enter(&dn->dn_struct_rwlock, RW_WRITER);
-
 	/* Check for any allocated blocks beyond the first */
 	if (dn->dn_maxblkid != 0)
-		goto fail;
+		return (SET_ERROR(ENOTSUP));
 
 	mutex_enter(&dn->dn_dbufs_mtx);
 	for (db = avl_first(&dn->dn_dbufs); db != NULL;
@@ -1729,20 +1730,20 @@ dnode_set_blksz(dnode_t *dn, uint64_t size, int ibs, dmu_tx_t *tx)
 		if (db->db_blkid != 0 && db->db_blkid != DMU_BONUS_BLKID &&
 		    db->db_blkid != DMU_SPILL_BLKID) {
 			mutex_exit(&dn->dn_dbufs_mtx);
-			goto fail;
+			return (SET_ERROR(ENOTSUP));
 		}
 	}
 	mutex_exit(&dn->dn_dbufs_mtx);
 
 	if (ibs && dn->dn_nlevels != 1)
-		goto fail;
+		return (SET_ERROR(ENOTSUP));
 
 	/* resize the old block */
 	err = dbuf_hold_impl(dn, 0, 0, TRUE, FALSE, FTAG, &db);
 	if (err == 0)
 		dbuf_new_size(db, size, tx);
 	else if (err != ENOENT)
-		goto fail;
+		return (SET_ERROR(ENOTSUP));
 
 	dnode_setdblksz(dn, size);
 	dnode_setdirty(dn, tx);
@@ -1755,12 +1756,19 @@ dnode_set_blksz(dnode_t *dn, uint64_t size, int ibs, dmu_tx_t *tx)
 	if (db)
 		dbuf_rele(db, FTAG);
 
-	rw_exit(&dn->dn_struct_rwlock);
 	return (0);
+}
 
-fail:
+int
+dnode_set_blksz(dnode_t *dn, uint64_t size, int ibs, dmu_tx_t *tx)
+{
+	int err;
+
+	rw_enter(&dn->dn_struct_rwlock, RW_WRITER);
+	err = dnode_set_blksz_impl(dn, size, ibs, tx);
 	rw_exit(&dn->dn_struct_rwlock);
-	return (SET_ERROR(ENOTSUP));
+
+	return (err);
 }
 
 static void

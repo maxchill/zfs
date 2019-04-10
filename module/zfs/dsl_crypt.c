@@ -2814,6 +2814,11 @@ spa_do_crypt_abd(boolean_t encrypt, spa_t *spa, const zbookmark_phys_t *zb,
 	/* look up the key from the spa's keystore */
 	ret = spa_keystore_lookup_key(spa, zb->zb_objset, FTAG, &dck);
 	if (ret != 0) {
+		char buf[128];
+
+		bookmark_to_name((zbookmark_phys_t *)zb, buf, 127);
+		zfs_dbgmsg("spa_keystore_lookup_key() %s %d", buf, ret);
+
 		ret = SET_ERROR(EACCES);
 		return (ret);
 	}
