@@ -42,6 +42,7 @@ dist_pkgdata_SCRIPTS = \
 	send_encrypted_truncated_files.ksh \
 	send_freeobjects.ksh \
 	send_realloc_dnode_size.ksh \
+	send_realloc_files.ksh \
 	send_holds.ksh \
 	send_hole_birth.ksh \
 	send_mixed_raw.ksh \
