@@ -2352,6 +2352,26 @@ Default value: \fB16,777,216\fR.
 .sp
 .ne 2
 .na
+\fBzfs_send_spill_block_bit\fR (int)
+.ad
+.RS 12n
+Allow the DRR_SPILL_BLOCK bit to be set in the OBJECT records of non-raw
+send streams.  When enabled the receiving system must include support for
+this feature.
+.sp
+When disabled additional DRR_SPILL records are included in order to recreate
+a spill block if it was incorrectly removed.  This may occur when certain
+attributes of the object change (block size, bonus size, etc).  These send
+streams are backwards compatible with previous versions for the ZFS software.
+.sp
+This feature will be enabled by default in a future release.
+.sp
+Use \fB1\fR for yes and \fB0\fR for no (default).
+.RE
+
+.sp
+.ne 2
+.na
 \fBzfs_recv_queue_length\fR (int)
 .ad
 .RS 12n

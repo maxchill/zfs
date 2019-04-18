@@ -101,12 +101,13 @@ typedef enum drr_headertype {
 /* flag #18 is reserved for a Delphix feature */
 #define	DMU_BACKUP_FEATURE_LARGE_BLOCKS		(1 << 19)
 #define	DMU_BACKUP_FEATURE_RESUMING		(1 << 20)
-/* flag #21 is reserved for a Delphix feature */
+/* flag #21 is reserved for the redacted send/receive feature */
 #define	DMU_BACKUP_FEATURE_COMPRESSED		(1 << 22)
 #define	DMU_BACKUP_FEATURE_LARGE_DNODE		(1 << 23)
 #define	DMU_BACKUP_FEATURE_RAW			(1 << 24)
 /* flag #25 is reserved for the ZSTD compression feature */
 #define	DMU_BACKUP_FEATURE_HOLDS		(1 << 26)
+#define	DMU_BACKUP_FEATURE_SPILL_BLOCK		(1 << 27)
 
 /*
  * Mask of all supported backup features
@@ -116,7 +117,8 @@ typedef enum drr_headertype {
     DMU_BACKUP_FEATURE_EMBED_DATA | DMU_BACKUP_FEATURE_LZ4 | \
     DMU_BACKUP_FEATURE_RESUMING | DMU_BACKUP_FEATURE_LARGE_BLOCKS | \
     DMU_BACKUP_FEATURE_COMPRESSED | DMU_BACKUP_FEATURE_LARGE_DNODE | \
-    DMU_BACKUP_FEATURE_RAW | DMU_BACKUP_FEATURE_HOLDS)
+    DMU_BACKUP_FEATURE_RAW | DMU_BACKUP_FEATURE_HOLDS | \
+    DMU_BACKUP_FEATURE_SPILL_BLOCK)
 
 /* Are all features in the given flag word currently supported? */
 #define	DMU_STREAM_SUPPORTED(x)	(!((x) & ~DMU_BACKUP_FEATURE_MASK))
@@ -131,7 +133,7 @@ typedef enum dmu_send_resume_token_version {
  *
  *	64	56	48	40	32	24	16	8	0
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
- *  	|		reserved	|        feature-flags	    |C|S|
+ *	|		reserved	|        feature-flags	    |C|S|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
  *
  * The low order two bits indicate the header type: SUBSTREAM (0x1)
@@ -167,9 +169,11 @@ typedef enum dmu_send_resume_token_version {
  */
 #define	DRR_CHECKSUM_DEDUP	(1<<0) /* not used for DRR_SPILL blocks */
 #define	DRR_RAW_BYTESWAP	(1<<1)
+#define	DRR_SPILL_BLOCK		(1<<2)
 
 #define	DRR_IS_DEDUP_CAPABLE(flags)	((flags) & DRR_CHECKSUM_DEDUP)
 #define	DRR_IS_RAW_BYTESWAPPED(flags)	((flags) & DRR_RAW_BYTESWAP)
+#define	DRR_HAS_SPILL_BLOCK(flags)	((flags) & DRR_SPILL_BLOCK)
 
 /* deal with compressed drr_write replay records */
 #define	DRR_WRITE_COMPRESSED(drrw)	((drrw)->drr_compressiontype != 0)

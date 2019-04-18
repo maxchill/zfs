@@ -76,12 +76,8 @@ for i in {1..5}; do
 
 	# Churn the filesystem in such a way that we're likely to be both
 	# allocating and reallocating objects in the incremental stream.
-	#
-	# Disable xattrs until the following spill block issue is resolved:
-	# https://github.com/openzfs/openzfs/pull/705
-	#
-	log_must churn_files 1000 524288 $POOL/fs 0
-	expected_cksum=$(recursive_cksum /$fs)
+	log_must churn_files 1000 524288 $POOL/fs
+	expected_cksum=$(recursive_cksum /$POOL/fs)
 
 	# Create a snapshot and use it to send an incremental stream.
 	this_snap=$((last_snap + 1))
