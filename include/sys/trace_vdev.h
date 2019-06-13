@@ -19,7 +19,8 @@
  * CDDL HEADER END
  */
 
-#if defined(_KERNEL) && defined(HAVE_DECLARE_EVENT_CLASS)
+#if defined(_KERNEL)
+#if defined(HAVE_DECLARE_EVENT_CLASS)
 
 #undef TRACE_SYSTEM
 #define	TRACE_SYSTEM zfs
@@ -116,4 +117,11 @@ DEFINE_REMOVE_FREE_EVENT_TXG(zfs_remove__free__inflight);
 #define	TRACE_INCLUDE_FILE trace_vdev
 #include <trace/define_trace.h>
 
-#endif /* _KERNEL && HAVE_DECLARE_EVENT_CLASS */
+#else
+
+DEFINE_DTRACE_PROBE3(remove__free__synced);
+DEFINE_DTRACE_PROBE3(remove__free__unvisited);
+DEFINE_DTRACE_PROBE4(remove__free__inflight);
+
+#endif /* HAVE_DECLARE_EVENT_CLASS */
+#endif /* _KERNEL */

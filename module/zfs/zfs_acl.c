@@ -2459,7 +2459,8 @@ zfs_fastaccesschk_execute(znode_t *zdp, cred_t *cr)
 	mutex_exit(&zdp->z_acl_lock);
 
 slow:
-	DTRACE_PROBE(zfs__fastpath__execute__access__miss);
+	// XXX - Needs to be defined
+	// DTRACE_PROBE(zfs__fastpath__execute__access__miss);
 	ZFS_ENTER(ZTOZSB(zdp));
 	error = zfs_zaccess(zdp, ACE_EXECUTE, 0, B_FALSE, cr);
 	ZFS_EXIT(ZTOZSB(zdp));

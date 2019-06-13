@@ -170,7 +170,9 @@ rrw_enter_read_impl(rrwlock_t *rrl, boolean_t prio, void *tag)
 		mutex_exit(&rrl->rr_lock);
 		return;
 	}
-	DTRACE_PROBE(zfs__rrwfastpath__rdmiss);
+
+	// XXX - NEEDS TO BE DEFINED
+	// DTRACE_PROBE(zfs__rrwfastpath__rdmiss);
 #endif
 	ASSERT(rrl->rr_writer != curthread);
 	ASSERT(zfs_refcount_count(&rrl->rr_anon_rcount) >= 0);
@@ -248,7 +250,8 @@ rrw_exit(rrwlock_t *rrl, void *tag)
 		mutex_exit(&rrl->rr_lock);
 		return;
 	}
-	DTRACE_PROBE(zfs__rrwfastpath__exitmiss);
+	// XXX - NEEDS TO BE DEFINED
+	// DTRACE_PROBE(zfs__rrwfastpath__exitmiss);
 #endif
 	ASSERT(!zfs_refcount_is_zero(&rrl->rr_anon_rcount) ||
 	    !zfs_refcount_is_zero(&rrl->rr_linked_rcount) ||
