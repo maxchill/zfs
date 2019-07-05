@@ -273,6 +273,7 @@ typedef int krw_t;
 #define	RW_WRITER		1
 #define	RW_DEFAULT		RW_READER
 #define	RW_NOLOCKDEP		RW_READER
+#define	RW_READER_PIDS		RW_READER
 
 #define	RW_READ_HELD(rw)	((rw)->rw_readers > 0)
 #define	RW_WRITE_HELD(rw)	pthread_equal((rw)->rw_owner, pthread_self())

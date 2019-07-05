@@ -25,7 +25,9 @@
 #ifndef _SPL_RWLOCK_H
 #define	_SPL_RWLOCK_H
 
+#include <sys/kmem.h>
 #include <sys/types.h>
+#include <linux/bitmap.h>
 #include <linux/rwsem.h>
 #include <linux/sched.h>
 
@@ -69,7 +71,8 @@
 typedef enum {
 	RW_DRIVER	= 2,
 	RW_DEFAULT	= 4,
-	RW_NOLOCKDEP	= 5
+	RW_NOLOCKDEP	= 5,	/* RW_DEFAULT, lockdep disabled */
+	RW_READER_PIDS	= 6,	/* RW_DEFAULT, all reader pids tracked */
 } krw_type_t;
 
 typedef enum {
@@ -90,9 +93,18 @@ typedef struct {
 #ifdef CONFIG_LOCKDEP
 	krw_type_t	rw_type;
 #endif /* CONFIG_LOCKDEP */
+	spinlock_t	rw_reader_lock;
+	unsigned long	*rw_reader_pids;
 } krwlock_t;
 
 #define	SEM(rwp)	(&(rwp)->rw_rwlock)
+
+/*
+ * DEBUG: Expected to default to 32,768 or less, inflating the size of the
+ * krwlock_t by 4096 bytes.  This is large but tolerable for debugging,
+ * and can be increased as required.
+ */
+#define	RW_MAX_READERS	PID_MAX_DEFAULT
 
 static inline void
 spl_rw_set_owner(krwlock_t *rwp)
@@ -122,6 +134,60 @@ rw_owner(krwlock_t *rwp)
 #else
 	return (rwp->rw_owner);
 #endif
+}
+
+static inline void
+spl_rw_set_reader(krwlock_t *rwp)
+{
+	if (unlikely(rwp->rw_reader_pids != NULL &&
+	    current->pid < RW_MAX_READERS)) {
+		spin_lock(&rwp->rw_reader_lock);
+		WARN_ON_ONCE(test_bit(current->pid, rwp->rw_reader_pids));
+		bitmap_set(rwp->rw_reader_pids, current->pid, 1);
+		spin_unlock(&rwp->rw_reader_lock);
+	}
+}
+
+static inline void
+spl_rw_clear_reader(krwlock_t *rwp)
+{
+	if (unlikely(rwp->rw_reader_pids != NULL &&
+	    current->pid < RW_MAX_READERS)) {
+		spin_lock(&rwp->rw_reader_lock);
+		WARN_ON_ONCE(!test_bit(current->pid, rwp->rw_reader_pids));
+		bitmap_clear(rwp->rw_reader_pids, current->pid, 1);
+		spin_unlock(&rwp->rw_reader_lock);
+	}
+}
+
+static inline void
+spl_rw_init_readers(krwlock_t *rwp, krw_type_t type)
+{
+	if (type == RW_READER_PIDS) {
+		/* XXX - bitmap_alloc() undefined until 4.18 */
+		spin_lock_init(&rwp->rw_reader_lock);
+		rwp->rw_reader_pids = kmalloc_array(
+		    BITS_TO_LONGS(RW_MAX_READERS),
+		    sizeof (unsigned long), kmem_flags_convert(KM_NOSLEEP));
+		if (rwp->rw_reader_pids != NULL) {
+			bitmap_zero(rwp->rw_reader_pids, RW_MAX_READERS);
+		}
+	} else {
+		rwp->rw_reader_pids = NULL;
+	}
+}
+
+static inline void
+spl_rw_destroy_readers(krwlock_t *rwp)
+{
+	/* XXX - bitmap_free() undefined until 4.18 */
+	if (unlikely(rwp->rw_reader_pids != NULL)) {
+		spin_lock(&rwp->rw_reader_lock);
+		WARN_ON_ONCE(!bitmap_empty(rwp->rw_reader_pids,
+		    RW_MAX_READERS));
+		kfree(rwp->rw_reader_pids);
+		spin_unlock(&rwp->rw_reader_lock);
+	}
 }
 
 #ifdef CONFIG_LOCKDEP
@@ -166,6 +232,19 @@ RW_READ_HELD(krwlock_t *rwp)
 {
 	if (!RW_LOCK_HELD(rwp))
 		return (0);
+
+	/*
+	 * Readers are tracker, only the bitmaps needs to be checked
+	 * as long as the process's pid is within the tracked range.
+	 */
+	if (unlikely(rwp->rw_reader_pids != NULL &&
+	    current->pid < RW_MAX_READERS)) {
+		spin_lock(&rwp->rw_reader_lock);
+		int rc = test_bit(current->pid, rwp->rw_reader_pids);
+		spin_unlock(&rwp->rw_reader_lock);
+
+		return (rc);
+	}
 
 	/*
 	 * rw_semaphore cheat sheet:
@@ -216,17 +295,22 @@ RW_READ_HELD(krwlock_t *rwp)
 #define	rw_init(rwp, name, type, arg)					\
 ({									\
 	static struct lock_class_key __key;				\
-	ASSERT(type == RW_DEFAULT || type == RW_NOLOCKDEP);		\
+	ASSERT(type == RW_DEFAULT || type == RW_NOLOCKDEP ||		\
+	    type == RW_READER_PIDS);					\
 									\
 	__init_rwsem(SEM(rwp), #rwp, &__key);				\
 	spl_rw_clear_owner(rwp);					\
 	spl_rw_set_type(rwp, type);					\
+	spl_rw_init_readers(rwp, type);					\
 })
 
 /*
  * The Linux rwsem implementation does not require a matching destroy.
  */
-#define	rw_destroy(rwp)		((void) 0)
+#define	rw_destroy(rwp)							\
+({									\
+	spl_rw_destroy_readers(rwp);					\
+})
 
 #define	rw_tryenter(rwp, rw)						\
 ({									\
@@ -235,7 +319,8 @@ RW_READ_HELD(krwlock_t *rwp)
 	spl_rw_lockdep_off_maybe(rwp);					\
 	switch (rw) {							\
 	case RW_READER:							\
-		_rc_ = down_read_trylock(SEM(rwp));			\
+		if ((_rc_ = down_read_trylock(SEM(rwp))))		\
+			spl_rw_set_reader(rwp);				\
 		break;							\
 	case RW_WRITER:							\
 		if ((_rc_ = down_write_trylock(SEM(rwp))))		\
@@ -254,6 +339,7 @@ RW_READ_HELD(krwlock_t *rwp)
 	switch (rw) {							\
 	case RW_READER:							\
 		down_read(SEM(rwp));					\
+		spl_rw_set_reader(rwp);					\
 		break;							\
 	case RW_WRITER:							\
 		down_write(SEM(rwp));					\
@@ -272,7 +358,7 @@ RW_READ_HELD(krwlock_t *rwp)
 		spl_rw_clear_owner(rwp);				\
 		up_write(SEM(rwp));					\
 	} else {							\
-		ASSERT(RW_READ_HELD(rwp));				\
+		spl_rw_clear_reader(rwp);				\
 		up_read(SEM(rwp));					\
 	}								\
 	spl_rw_lockdep_on_maybe(rwp);					\
@@ -282,6 +368,7 @@ RW_READ_HELD(krwlock_t *rwp)
 ({									\
 	spl_rw_lockdep_off_maybe(rwp);					\
 	spl_rw_clear_owner(rwp);					\
+	spl_rw_set_reader(rwp);						\
 	downgrade_write(SEM(rwp));					\
 	spl_rw_lockdep_on_maybe(rwp);					\
 })
@@ -294,8 +381,10 @@ RW_READ_HELD(krwlock_t *rwp)
 		_rc_ = 1;						\
 	} else {							\
 		spl_rw_lockdep_off_maybe(rwp);				\
-		if ((_rc_ = rwsem_tryupgrade(SEM(rwp))))		\
+		if ((_rc_ = rwsem_tryupgrade(SEM(rwp)))) {		\
 			spl_rw_set_owner(rwp);				\
+			spl_rw_clear_reader(rwp);			\
+		}							\
 		spl_rw_lockdep_on_maybe(rwp);				\
 	}								\
 	_rc_;								\
