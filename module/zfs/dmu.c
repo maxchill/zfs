@@ -1311,6 +1311,12 @@ xuio_stat_wbuf_nocopy(void)
 }
 
 #ifdef _KERNEL
+static void
+dmu_read_uio_direct_done(zio_t *zio)
+{
+	abd_put((abd_t *)zio->io_private);
+}
+
 int
 dmu_read_uio_dnode(dnode_t *dn, uio_t *uio, uint64_t size)
 {
@@ -1319,6 +1325,47 @@ dmu_read_uio_dnode(dnode_t *dn, uio_t *uio, uint64_t size)
 #ifdef HAVE_UIO_ZEROCOPY
 	xuio_t *xuio = NULL;
 #endif
+	/*
+	 * Only allow single segment uio's which are block aligned.
+	 */
+	if (uio->uio_extflg & UIO_DIRECT) {
+		if ((uio->uio_iovcnt == 1) &&
+		    (uio->uio_loffset % dn->dn_datablksz == 0) &&
+		    (size % dn->dn_datablksz == 0)) {
+			const struct iovec *iov = uio->uio_iov;
+			spa_t *spa = dn->dn_objset->os_spa;
+			zio_t *rio;
+
+			err = dmu_buf_hold_array_by_dnode(dn, uio->uio_loffset,
+			    size, B_FALSE, FTAG, &numbufs, &dbp, 0);
+			if (err)
+				return (err);
+
+			rio = zio_root(spa, NULL, NULL, ZIO_FLAG_CANFAIL);
+
+			for (i = 0; i < numbufs; i++) {
+				dmu_buf_impl_t *db = (dmu_buf_impl_t *)dbp[i];
+				blkptr_t *bp = db->db_blkptr;
+				size_t psize = BP_GET_PSIZE(bp);
+				abd_t *data = abd_get_from_buf(
+				    iov->iov_base + i * psize, psize);
+
+				zio_nowait(zio_read(rio, spa, bp, data, psize,
+				    dmu_read_uio_direct_done, data,
+				    ZIO_PRIORITY_SYNC_READ, 0, NULL));
+			}
+
+			err = zio_wait(rio);
+			if (err == 0)
+				uioskip(uio, size);
+
+			dmu_buf_rele_array(dbp, numbufs, FTAG);
+
+			return (err);
+		} else {
+			return (SET_ERROR(EINVAL));
+		}
+	}
 
 	/*
 	 * NB: we could do this block-at-a-time, but it's nice
