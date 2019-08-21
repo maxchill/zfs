@@ -13,6 +13,8 @@ ZFS_MODULE_CFLAGS += -std=gnu99 -Wno-declaration-after-statement
 ZFS_MODULE_CFLAGS += @KERNEL_DEBUG_CFLAGS@
 ZFS_MODULE_CFLAGS += -include @abs_top_builddir@/zfs_config.h
 ZFS_MODULE_CFLAGS += -I@abs_top_srcdir@/include/spl
+ZFS_MODULE_CFLAGS += -I@abs_top_srcdir@/include/os/linux/spl
+ZFS_MODULE_CFLAGS += -I@abs_top_srcdir@/include/os/linux/zfs
 ZFS_MODULE_CFLAGS += -I@abs_top_srcdir@/include
 
 ZFS_MODULE_CPPFLAGS += -D_KERNEL

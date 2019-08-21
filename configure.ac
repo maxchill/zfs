@@ -147,9 +147,13 @@ AC_CONFIG_FILES([
 	module/spl/Makefile
 	include/Makefile
 	include/linux/Makefile
-	include/spl/Makefile
-	include/spl/rpc/Makefile
-	include/spl/sys/Makefile
+        include/os/Makefile
+        include/os/linux/Makefile
+        include/os/linux/spl/Makefile
+        include/os/linux/spl/rpc/Makefile
+        include/os/linux/spl/sys/Makefile
+        include/os/linux/zfs/Makefile
+        include/os/linux/zfs/sys/Makefile
 	include/sys/Makefile
 	include/sys/fs/Makefile
 	include/sys/fm/Makefile
