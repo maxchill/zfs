@@ -7,6 +7,6 @@ KERNEL_H = \
 	$(top_srcdir)/include/os/linux/zfs/sys/zpl.h
 
 if CONFIG_KERNEL
-kerneldir = @prefix@/src/zfs-$(VERSION)/include/os/linux/zfs/sys
+kerneldir = @prefix@/src/zfs-$(VERSION)/include/sys
 kernel_HEADERS = $(KERNEL_H)
 endif

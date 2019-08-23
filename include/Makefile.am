@@ -1,9 +1,5 @@
 SUBDIRS = sys os
 
-if BUILD_LINUX
-SUBDIRS += linux
-endif
-
 COMMON_H = \
 	$(top_srcdir)/include/zfeature_common.h \
 	$(top_srcdir)/include/zfs_comutil.h \

@@ -56,6 +56,6 @@ KERNEL_H = \
 	$(top_srcdir)/include/os/linux/spl/sys/zone.h
 
 if CONFIG_KERNEL
-kerneldir = @prefix@/src/zfs-$(VERSION)/include/os/linux/spl/sys
+kerneldir = @prefix@/src/zfs-$(VERSION)/include/spl/sys
 kernel_HEADERS = $(KERNEL_H)
 endif
