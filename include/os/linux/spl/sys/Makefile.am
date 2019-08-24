@@ -33,6 +33,7 @@ KERNEL_H = \
 	$(top_srcdir)/include/os/linux/spl/sys/shrinker.h \
 	$(top_srcdir)/include/os/linux/spl/sys/sid.h \
 	$(top_srcdir)/include/os/linux/spl/sys/signal.h \
+	$(top_srcdir)/include/os/linux/spl/sys/simd.h \
 	$(top_srcdir)/include/os/linux/spl/sys/stat.h \
 	$(top_srcdir)/include/os/linux/spl/sys/strings.h \
 	$(top_srcdir)/include/os/linux/spl/sys/sunddi.h \

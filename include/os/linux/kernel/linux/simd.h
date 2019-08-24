@@ -22,8 +22,8 @@
  * Copyright (C) 2019 Lawrence Livermore National Security, LLC.
  */
 
-#ifndef _SIMD_H
-#define	_SIMD_H
+#ifndef _LINUX_SIMD_H
+#define	_LINUX_SIMD_H
 
 #if defined(__x86)
 #include <linux/simd_x86.h>
@@ -32,10 +32,10 @@
 #include <linux/simd_aarch64.h>
 #else
 
-#define	kfpu_allowed()		1
+#define	kfpu_allowed()		0
 #define	kfpu_initialize(tsk)	do {} while (0)
 #define	kfpu_begin()		do {} while (0)
 #define	kfpu_end()		do {} while (0)
 
 #endif
-#endif /* _SIMD_H */
+#endif /* _LINUX_SIMD_H */
