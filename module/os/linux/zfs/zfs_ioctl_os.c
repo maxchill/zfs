@@ -65,9 +65,6 @@
 #include <linux/miscdevice.h>
 #include <linux/slab.h>
 
-extern kmutex_t zfsdev_state_lock;
-extern zfsdev_state_t *zfsdev_state_list;
-
 int
 zfs_vfs_ref(zfsvfs_t **zfvp)
 {
@@ -77,7 +74,6 @@ zfs_vfs_ref(zfsvfs_t **zfvp)
 	}
 	return (0);
 }
-
 
 static int
 zfsdev_state_init(struct file *filp)
@@ -108,7 +104,6 @@ zfsdev_state_init(struct file *filp)
 
 	zfs_onexit_init((zfs_onexit_t **)&zs->zs_onexit);
 	zfs_zevent_init((zfs_zevent_t **)&zs->zs_zevent);
-
 
 	/*
 	 * In order to provide for lock-free concurrent read access
@@ -213,7 +208,6 @@ zfsdev_getminor(struct file *filp, minor_t *minorp)
 void
 zfs_ioctl_init_os(void)
 {
-	return;
 }
 
 #ifdef CONFIG_COMPAT
@@ -293,7 +287,9 @@ _init(void)
 
 		return (-error);
 	}
+
 	zfs_sysfs_init();
+
 	printk(KERN_NOTICE "ZFS: Loaded module v%s-%s%s, "
 	    "ZFS pool version %s, ZFS filesystem version %s\n",
 	    ZFS_META_VERSION, ZFS_META_RELEASE, ZFS_DEBUG_STR,

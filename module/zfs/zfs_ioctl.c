@@ -3572,11 +3572,11 @@ zfs_destroy_unmount_origin(const char *fsname)
  */
 static const zfs_ioc_key_t zfs_keys_destroy_snaps[] = {
 	{"snaps",	DATA_TYPE_NVLIST,	0},
-	{"defer", 	DATA_TYPE_BOOLEAN,	ZK_OPTIONAL},
+	{"defer",	DATA_TYPE_BOOLEAN,	ZK_OPTIONAL},
 };
 
 /* ARGSUSED */
-int
+static int
 zfs_ioc_destroy_snaps(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
 {
 	int poollen;
@@ -7058,9 +7058,6 @@ zfs_ioctl_init(void)
 	    zfs_ioc_tmp_snapshot, zfs_secpolicy_tmp_snapshot,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY);
 
-	/*
-	 * ZoL functions
-	 */
 	zfs_ioctl_register_legacy(ZFS_IOC_EVENTS_NEXT, zfs_ioc_events_next,
 	    zfs_secpolicy_config, NO_NAME, B_FALSE, POOL_CHECK_NONE);
 	zfs_ioctl_register_legacy(ZFS_IOC_EVENTS_CLEAR, zfs_ioc_events_clear,

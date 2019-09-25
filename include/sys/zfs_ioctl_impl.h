@@ -23,6 +23,9 @@
 #ifndef _ZFS_IOCTL_IMPL_H_
 #define	_ZFS_IOCTL_IMPL_H_
 
+extern kmutex_t zfsdev_state_lock;
+extern zfsdev_state_t *zfsdev_state_list;
+
 typedef int zfs_ioc_legacy_func_t(zfs_cmd_t *);
 typedef int zfs_ioc_func_t(const char *, nvlist_t *, nvlist_t *);
 typedef int zfs_secpolicy_func_t(zfs_cmd_t *, nvlist_t *, cred_t *);
@@ -50,8 +53,8 @@ typedef enum {
  * "optional" key.
  *
  * When adding new keys to an existing ioc for new functionality, consider:
- * 	- adding an entry into zfs_sysfs.c zfs_features[] list
- * 	- updating the libzfs_input_check.c test utility
+ *	- adding an entry into zfs_sysfs.c zfs_features[] list
+ *	- updating the libzfs_input_check.c test utility
  *
  * Note: in the ZK_WILDCARDLIST case, the name serves as documentation
  * for the expected name (bookmark, snapshot, property, etc) but there
