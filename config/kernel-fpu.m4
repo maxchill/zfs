@@ -2,15 +2,9 @@ dnl #
 dnl # Handle differences in kernel FPU code.
 dnl #
 dnl # Kernel
-dnl # 5.2:	The fpu->initialized flag was replaced by TIF_NEED_FPU_LOAD.
-dnl #		HAVE_KERNEL_TIF_NEED_FPU_LOAD
-dnl #
-dnl # 5.0:	As an optimization SIMD operations performed by kernel
-dnl #		threads can skip saving and restoring their FPU context.
-dnl #		Wrappers have been introduced to determine the running
-dnl #		context and use either the SIMD or generic implementation.
+dnl # 5.0:	Wrappers have been introduced to save/restore the FPU state.
 dnl #		This change was made to the 4.19.38 and 4.14.120 LTS kernels.
-dnl #		HAVE_KERNEL_FPU_INITIALIZED
+dnl #		HAVE_KERNEL_FPU_INTERNAL
 dnl #
 dnl # 4.2:	Use __kernel_fpu_{begin,end}()
 dnl #		HAVE_UNDERSCORE_KERNEL_FPU & KERNEL_EXPORTS_X86_FPU
@@ -19,7 +13,11 @@ dnl # Pre-4.2:	Use kernel_fpu_{begin,end}()
 dnl #		HAVE_KERNEL_FPU & KERNEL_EXPORTS_X86_FPU
 dnl #
 AC_DEFUN([ZFS_AC_KERNEL_FPU], [
-	AC_MSG_CHECKING([which kernel_fpu header to use])
+	dnl #
+	dnl # N.B. The header check is performed before all other checks since
+	dnl # it depends on HAVE_KERNEL_FPU_API_HEADER being set in confdefs.h.
+	dnl #
+	AC_MSG_CHECKING([whether fpu headers are available])
 	ZFS_LINUX_TRY_COMPILE([
 		#include <linux/module.h>
 		#include <asm/fpu/api.h>
@@ -32,9 +30,13 @@ AC_DEFUN([ZFS_AC_KERNEL_FPU], [
 		AC_MSG_RESULT(i387.h & xcr.h)
 	])
 
-	AC_MSG_CHECKING([which kernel_fpu function to use])
+	dnl #
+	dnl # Legacy kernel
+	dnl #
+	AC_MSG_CHECKING([whether kernel fpu is available])
 	ZFS_LINUX_TRY_COMPILE_SYMBOL([
 		#include <linux/module.h>
+		#include <linux/types.h>
 		#ifdef HAVE_KERNEL_FPU_API_HEADER
 		#include <asm/fpu/api.h>
 		#else
@@ -52,8 +54,12 @@ AC_DEFUN([ZFS_AC_KERNEL_FPU], [
 		AC_DEFINE(KERNEL_EXPORTS_X86_FPU, 1,
 		    [kernel exports FPU functions])
 	],[
+		dnl #
+		dnl # Linux 4.2 kernel
+		dnl #
 		ZFS_LINUX_TRY_COMPILE_SYMBOL([
 			#include <linux/module.h>
+			#include <linux/types.h>
 			#ifdef HAVE_KERNEL_FPU_API_HEADER
 			#include <asm/fpu/api.h>
 			#else
@@ -64,7 +70,8 @@ AC_DEFUN([ZFS_AC_KERNEL_FPU], [
 		],[
 			__kernel_fpu_begin();
 			__kernel_fpu_end();
-		], [__kernel_fpu_begin], [arch/x86/kernel/fpu/core.c arch/x86/kernel/i387.c], [
+		], [__kernel_fpu_begin],
+		[arch/x86/kernel/fpu/core.c arch/x86/kernel/i387.c], [
 			AC_MSG_RESULT(__kernel_fpu_*)
 			AC_DEFINE(HAVE_UNDERSCORE_KERNEL_FPU, 1,
 			    [kernel has __kernel_fpu_* functions])
@@ -73,31 +80,49 @@ AC_DEFUN([ZFS_AC_KERNEL_FPU], [
 		],[
 			ZFS_LINUX_TRY_COMPILE([
 				#include <linux/module.h>
-				#include <linux/sched.h>
+
+				#if defined(__x86_64) || defined(__x86_64__) || \
+				    defined(__i386) || defined(__i386__)
+				#if !defined(__x86)
+				#define __x86
+				#endif
+				#endif
+
+				#if !defined(__x86)
+				#error Unsupported architecture
+				#endif
+
+				#include <linux/types.h>
+				#ifdef HAVE_KERNEL_FPU_API_HEADER
+				#include <asm/fpu/api.h>
+				#include <asm/fpu/internal.h>
+				#else
+				#include <asm/i387.h>
+				#include <asm/xcr.h>
+				#endif
+
+				#if !defined(XSTATE_XSAVE)
+				#error XSTATE_XSAVE not defined
+				#endif
+
+				#if !defined(XSTATE_XRESTORE)
+				#error XSTATE_XRESTORE not defined
+				#endif
 			],[
 				struct fpu *fpu = &current->thread.fpu;
-				if (fpu->initialized) { return (0); };
+				union fpregs_state *st = &fpu->state;
+				struct fregs_state *fr __attribute__ ((unused)) =
+				    &st->fsave;
+				struct fxregs_state *fxr __attribute__ ((unused)) =
+				    &st->fxsave;
+				struct xregs_state *xr __attribute__ ((unused)) =
+				    &st->xsave;
+			], [
+				AC_MSG_RESULT(internal)
+				AC_DEFINE(HAVE_KERNEL_FPU_INTERNAL, 1,
+				    [kernel fpu internal])
 			],[
-				AC_MSG_RESULT(fpu.initialized)
-				AC_DEFINE(HAVE_KERNEL_FPU_INITIALIZED, 1,
-				    [kernel fpu.initialized exists])
-			],[
-				ZFS_LINUX_TRY_COMPILE([
-					#include <linux/module.h>
-					#include <asm/thread_info.h>
-
-					#if !defined(TIF_NEED_FPU_LOAD)
-					#error "TIF_NEED_FPU_LOAD undefined"
-					#endif
-				],[
-				],[
-					AC_MSG_RESULT(TIF_NEED_FPU_LOAD)
-					AC_DEFINE(
-					    HAVE_KERNEL_TIF_NEED_FPU_LOAD, 1,
-					    [kernel TIF_NEED_FPU_LOAD exists])
-				],[
-					AC_MSG_RESULT(unavailable)
-				])
+				AC_MSG_RESULT(unavailable)
 			])
 		])
 	])
