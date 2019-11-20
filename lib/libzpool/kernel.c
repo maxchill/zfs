@@ -1053,23 +1053,18 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 	zfs_file_t *fp;
 	struct stat64 st;
 
-	if (!(flags & O_CREAT) && stat64(path, &st) == -1) {
-		err = errno;
-		return (err);
-	}
+	if (!(flags & O_CREAT) && stat64(path, &st) == -1)
+		return (errno);
 
 	if (!(flags & O_CREAT) && S_ISBLK(st.st_mode))
 		flags |= O_DIRECT;
-
 
 	if (flags & O_CREAT)
 		old_umask = umask(0);
 
 	fd = open64(path, flags, mode);
-	if (fd == -1) {
-		err = errno;
-		return (err);
-	}
+	if (fd == -1)
+		return (errno);
 
 	if (flags & O_CREAT)
 		(void) umask(old_umask);
@@ -1097,6 +1092,7 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 	fp->f_fd = fd;
 	fp->f_dump_fd = dump_fd;
 	*fpp = fp;
+
 	return (0);
 }
 
@@ -1317,7 +1313,6 @@ zfs_file_getattr(zfs_file_t *fp, zfs_file_attr_t *zfattr)
 
 	return (0);
 }
-
 
 /*
  * Sync file to disk

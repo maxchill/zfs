@@ -5219,7 +5219,7 @@ zfs_ioc_recv_new(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 }
 
 typedef struct dump_bytes_io {
-	zfs_file_t		*dbi_fp;
+	zfs_file_t	*dbi_fp;
 	caddr_t		dbi_buf;
 	int		dbi_len;
 	int		dbi_err;

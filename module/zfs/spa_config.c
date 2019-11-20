@@ -159,7 +159,8 @@ spa_config_remove(spa_config_dirent_t *dp)
 	 * platform fallback to truncating the file which is functionally
 	 * equivalent.
 	 */
-	if (zfs_file_unlink(dp->scd_path) == EOPNOTSUPP) {
+	error = zfs_file_unlink(dp->scd_path);
+	if (error == EOPNOTSUPP) {
 		int flags = O_RDWR | O_TRUNC;
 		zfs_file_t *fp;
 
@@ -169,6 +170,7 @@ spa_config_remove(spa_config_dirent_t *dp)
 			(void) zfs_file_close(fp);
 		}
 	}
+
 	return (error);
 }
 
@@ -207,7 +209,6 @@ spa_config_write(spa_config_dirent_t *dp, nvlist_t *nvl)
 	 */
 	err = zfs_file_open(dp->scd_path, oflags, 0644, &fp);
 	if (err == 0) {
-
 		err = zfs_file_write(fp, buf, buflen, NULL);
 		if (err == 0)
 			err = zfs_file_fsync(fp, O_SYNC);
