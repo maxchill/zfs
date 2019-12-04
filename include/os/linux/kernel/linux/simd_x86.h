@@ -135,7 +135,10 @@
  */
 #if defined(HAVE_KERNEL_FPU_INTERNAL)
 
+#include <sys/zfs_context.h>
+
 extern union fpregs_state **zfs_kfpu_fpregs;
+extern kmem_cache_t *zfs_kfpu_state_cache;
 
 /*
  * Initialize per-cpu variables to store FPU state.
@@ -145,13 +148,17 @@ kfpu_fini(void)
 {
 	int cpu;
 
-	for_each_possible_cpu(cpu) {
-		if (zfs_kfpu_fpregs[cpu] != NULL) {
-			kfree(zfs_kfpu_fpregs[cpu]);
+	if (zfs_kfpu_fpregs != NULL) {
+		for_each_possible_cpu(cpu) {
+			if (zfs_kfpu_fpregs[cpu] != NULL) {
+				kmem_cache_free(zfs_kfpu_state_cache,
+				    zfs_kfpu_fpregs[cpu]);
+			}
 		}
+		kfree(zfs_kfpu_fpregs);
 	}
 
-	kfree(zfs_kfpu_fpregs);
+	kmem_cache_destroy(zfs_kfpu_state_cache);
 }
 
 static inline int
@@ -159,14 +166,25 @@ kfpu_init(void)
 {
 	int cpu;
 
-	zfs_kfpu_fpregs = kzalloc(num_possible_cpus() *
-	    sizeof (union fpregs_state *), GFP_KERNEL);
-	if (zfs_kfpu_fpregs == NULL)
+	/*
+	 * need to use kmem_cache_create to force alignment! kmalloc is not
+	 * (yet) guarantueed to align in configurations.
+	 */
+	zfs_kfpu_state_cache = kmem_cache_create("zfs_kfpu_state",
+	    sizeof (union fpregs_state), 64, NULL, NULL, NULL, NULL, NULL, 0);
+	if (zfs_kfpu_state_cache == NULL)
 		return (-ENOMEM);
 
+	zfs_kfpu_fpregs = kzalloc(num_possible_cpus() *
+	    sizeof (union fpregs_state *), GFP_KERNEL);
+	if (zfs_kfpu_fpregs == NULL) {
+		kfpu_fini();
+		return (-ENOMEM);
+	}
+
 	for_each_possible_cpu(cpu) {
-		zfs_kfpu_fpregs[cpu] = kmalloc_node(sizeof (union fpregs_state),
-		    GFP_KERNEL | __GFP_ZERO, cpu_to_node(cpu));
+		zfs_kfpu_fpregs[cpu] = kmem_cache_alloc(zfs_kfpu_state_cache,
+		    GFP_KERNEL | __GFP_ZERO);
 		if (zfs_kfpu_fpregs[cpu] == NULL) {
 			kfpu_fini();
 			return (-ENOMEM);
