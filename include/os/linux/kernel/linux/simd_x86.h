@@ -135,10 +135,15 @@
  */
 #if defined(HAVE_KERNEL_FPU_INTERNAL)
 
-#include <sys/zfs_context.h>
+/*
+ * Verify the kernel and not spl slab allocator are being used.
+ */
+#if defined(kmem_cache_create)
+#error "Kernel slab allocator must be used"
+#endif
 
 extern union fpregs_state **zfs_kfpu_fpregs;
-extern kmem_cache_t *zfs_kfpu_state_cache;
+extern struct kmem_cache *zfs_kfpu_state_cache;
 
 /*
  * Initialize per-cpu variables to store FPU state.
@@ -167,11 +172,11 @@ kfpu_init(void)
 	int cpu;
 
 	/*
-	 * need to use kmem_cache_create to force alignment! kmalloc is not
-	 * (yet) guarantueed to align in configurations.
+	 * Use kmem_cache_create to force 64-byte alignment of the target
+	 * memory which is a requirement of fxsave and xsave.
 	 */
 	zfs_kfpu_state_cache = kmem_cache_create("zfs_kfpu_state",
-	    sizeof (union fpregs_state), 64, NULL, NULL, NULL, NULL, NULL, 0);
+	    sizeof (union fpregs_state), 64, SLAB_HWCACHE_ALIGN, NULL);
 	if (zfs_kfpu_state_cache == NULL)
 		return (-ENOMEM);
 
@@ -183,8 +188,9 @@ kfpu_init(void)
 	}
 
 	for_each_possible_cpu(cpu) {
-		zfs_kfpu_fpregs[cpu] = kmem_cache_alloc(zfs_kfpu_state_cache,
-		    GFP_KERNEL | __GFP_ZERO);
+		zfs_kfpu_fpregs[cpu] = kmem_cache_alloc_node(
+		    zfs_kfpu_state_cache, GFP_KERNEL | __GFP_ZERO,
+		    cpu_to_node(cpu));
 		if (zfs_kfpu_fpregs[cpu] == NULL) {
 			kfpu_fini();
 			return (-ENOMEM);
