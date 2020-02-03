@@ -38,10 +38,10 @@ endif
 
 KERNEL_C = \
 	algs/sha2/sha2.c \
-	draid_config.c \
 	zfeature_common.c \
 	zfs_comutil.c \
 	zfs_deleg.c \
+	zfs_draid.c \
 	zfs_fletcher.c \
 	zfs_fletcher_aarch64_neon.c \
 	zfs_fletcher_avx512.c \

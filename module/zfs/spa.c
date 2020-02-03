@@ -5607,22 +5607,25 @@ spa_create_check_encryption_params(dsl_crypto_params_t *dcp,
 	return (dmu_objset_create_crypt_check(NULL, dcp, NULL));
 }
 
+
+/*
+ * Add virtual dRAID spares to the list of valid spares.
+ */
 static int
 spa_add_draid_spare(nvlist_t *nvroot, vdev_t *rvd)
 {
-	int i, j, n;
+	vdev_draid_config_t *vdc;
 	nvlist_t **oldspares, **newspares;
 	uint_t nspares;
-	vdev_t *c;
-	struct vdev_draid_configuration *cfg;
+	int n = 0;
 
-	for (i = 0, n = 0; i < rvd->vdev_children; i++) {
-		c = rvd->vdev_child[i];
+	for (uint64_t i = 0; i < rvd->vdev_children; i++) {
+		vdev_t *c = rvd->vdev_child[i];
 
 		if (c->vdev_ops == &vdev_draid_ops) {
-			cfg = c->vdev_tsd;
-			ASSERT(cfg != NULL);
-			n += cfg->dcf_spare;
+			vdc = c->vdev_tsd;
+			ASSERT(vdc != NULL);
+			n += vdc->vdc_spares;
 		}
 	}
 
@@ -5630,35 +5633,37 @@ spa_add_draid_spare(nvlist_t *nvroot, vdev_t *rvd)
 		return (0);
 
 	if (nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_SPARES,
-	    &oldspares, &nspares) != 0)
+	    &oldspares, &nspares) != 0) {
 		nspares = 0;
+	}
 
 	newspares = kmem_alloc(sizeof (*newspares) * (n + nspares), KM_SLEEP);
-	for (i = 0; i < nspares; i++)
+	for (int i = 0; i < nspares; i++)
 		newspares[i] = fnvlist_dup(oldspares[i]);
 
-	for (i = 0, n = nspares; i < rvd->vdev_children; i++) {
-		c = rvd->vdev_child[i];
+	n = nspares;
+	for (uint64_t i = 0; i < rvd->vdev_children; i++) {
+		vdev_t *c = rvd->vdev_child[i];
 
 		if (c->vdev_ops != &vdev_draid_ops)
 			continue;
 
-		cfg = c->vdev_tsd;
-		for (j = 0; j < cfg->dcf_spare; j++) {
+		vdc = c->vdev_tsd;
+		for (uint64_t j = 0; j < vdc->vdc_spares; j++) {
 			nvlist_t *ds = fnvlist_alloc();
 			char path[64];
 
-			snprintf(path, sizeof (path), VDEV_DRAID_SPARE_PATH_FMT,
-			    (long unsigned)c->vdev_nparity,
-			    (long unsigned)c->vdev_id, (long unsigned)j);
-			fnvlist_add_string(ds, ZPOOL_CONFIG_PATH, path);
-			fnvlist_add_string(ds,
-			    ZPOOL_CONFIG_TYPE, VDEV_TYPE_DRAID_SPARE);
+			fnvlist_add_string(ds, ZPOOL_CONFIG_PATH,
+			    vdev_draid_spare_name(path, sizeof (path),
+			    vdc->vdc_parity, vdc->vdc_groups, vdc->vdc_spares,
+			    c->vdev_id, j));
+			fnvlist_add_string(ds, ZPOOL_CONFIG_TYPE,
+			    VDEV_TYPE_DRAID_SPARE);
 			fnvlist_add_uint64(ds, ZPOOL_CONFIG_IS_LOG, 0);
 			fnvlist_add_uint64(ds, ZPOOL_CONFIG_IS_SPARE, 1);
 			fnvlist_add_uint64(ds, ZPOOL_CONFIG_WHOLE_DISK, 1);
-			fnvlist_add_uint64(ds,
-			    ZPOOL_CONFIG_ASHIFT, c->vdev_ashift);
+			fnvlist_add_uint64(ds, ZPOOL_CONFIG_ASHIFT,
+			    c->vdev_ashift);
 
 			newspares[n] = ds;
 			n++;
@@ -5667,9 +5672,11 @@ spa_add_draid_spare(nvlist_t *nvroot, vdev_t *rvd)
 
 	(void) nvlist_remove_all(nvroot, ZPOOL_CONFIG_SPARES);
 	fnvlist_add_nvlist_array(nvroot, ZPOOL_CONFIG_SPARES, newspares, n);
-	for (i = 0; i < n; i++)
+
+	for (int i = 0; i < n; i++)
 		nvlist_free(newspares[i]);
 	kmem_free(newspares, sizeof (*newspares) * n);
+
 	return (0);
 }
 

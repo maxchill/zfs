@@ -11,10 +11,10 @@ ccflags-y := $(ZFS_MODULE_CFLAGS) $(ZFS_MODULE_CPPFLAGS)
 # Suppress unused-value warnings in sparc64 architecture headers
 ccflags-$(CONFIG_SPARC64) += -Wno-unused-value
 
-$(MODULE)-objs += draid_config.o
 $(MODULE)-objs += zfeature_common.o
 $(MODULE)-objs += zfs_comutil.o
 $(MODULE)-objs += zfs_deleg.o
+$(MODULE)-objs += zfs_draid.o
 $(MODULE)-objs += zfs_fletcher.o
 $(MODULE)-objs += zfs_fletcher_superscalar.o
 $(MODULE)-objs += zfs_fletcher_superscalar4.o

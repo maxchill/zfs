@@ -528,11 +528,9 @@ enum ztest_object {
 	ZTEST_OBJECTS
 };
 
-#define	DRAID_CONFIG		"draid.config"
 static void usage(boolean_t) __NORETURN;
 static int ztest_scrub_impl(spa_t *spa);
 
-static void make_draid_config(ztest_shared_opts_t *zo);
 /*
  * These libumem hooks provide a reasonable set of defaults for the allocator's
  * debugging facilities.
@@ -980,8 +978,6 @@ process_options(int argc, char **argv)
 		(void) strlcpy(zo->zo_raid_type, VDEV_TYPE_DRAID,
 		    sizeof (zo->zo_raid_type));
 
-		make_draid_config(zo);
-
 	} else /* using raidz */ {
 		ASSERT0(strcmp(raid_kind, "raidz"));
 
@@ -1081,89 +1077,6 @@ ztest_check_path(char *path)
 	return (!stat(path, &s));
 }
 
-static void
-ztest_get_draidcfg_bin(char *bin, int len)
-{
-	VERIFY(realpath(getexecname(), bin) != NULL);
-
-	if (strstr(bin, "/ztest/")) {
-		strstr(bin, "/ztest/")[0] = '\0'; /* In-tree */
-		strcat(bin, "/draidcfg/draidcfg");
-		if (ztest_check_path(bin))
-			return;
-	}
-	strcpy(bin, "draidcfg");
-}
-
-/*
- * dRAID configured via draidcfg command
- */
-static void
-ztest_run_draidcfg(uint_t total, uint_t groups, uint_t parity, uint_t spares,
-    const char *path)
-{
-	int status;
-	char *bin;
-	char *draidcfg;
-	char *zbuf;
-	const int len = MAXPATHLEN + MAXNAMELEN + 20;
-	FILE *fp;
-
-	bin = umem_alloc(len, UMEM_NOFAIL);
-	draidcfg = umem_alloc(len, UMEM_NOFAIL);
-	zbuf = umem_alloc(1024, UMEM_NOFAIL);
-
-	ztest_get_draidcfg_bin(bin, len);
-
-	/*
-	 * draidcfg -n total_drives -g number_of_redundancy_groups
-	 * -p parity_per_group -s distributed_spare cfg_file_name
-	 */
-	(void) sprintf(draidcfg, "%s -n %d -g %d -p %d -s %d %s",
-	    bin, total, groups, parity, spares, path);
-
-	if (ztest_opts.zo_verbose >= 3)
-		(void) printf("Executing %s\n", strstr(draidcfg, "draidcfg "));
-
-	fp = popen(draidcfg, "r");
-
-	while (fgets(zbuf, 1024, fp) != NULL)
-		if (ztest_opts.zo_verbose > 4)
-			(void) printf("%s", zbuf);
-
-	status = pclose(fp);
-
-	if (status == 0)
-		goto out;
-
-	ztest_dump_core = 0;
-	if (WIFEXITED(status))
-		fatal(0, "'%s' exit code %d", draidcfg, WEXITSTATUS(status));
-	else
-		fatal(0, "'%s' died with signal %d", draidcfg,
-		    WTERMSIG(status));
-out:
-	umem_free(bin, len);
-	umem_free(draidcfg, len);
-	umem_free(zbuf, 1024);
-}
-
-static void
-make_draid_config(ztest_shared_opts_t *zo)
-{
-	char *path;
-
-	path = umem_alloc(MAXPATHLEN, UMEM_NOFAIL);
-	(void) snprintf(path, MAXPATHLEN, "%s/%s", zo->zo_dir, DRAID_CONFIG);
-
-	/* build a dRAID config */
-	ztest_run_draidcfg(ztest_opts.zo_raid_children,
-	    ztest_opts.zo_draid_groups, ztest_opts.zo_raid_parity,
-	    ztest_opts.zo_draid_spares, path);
-
-	umem_free(path, MAXPATHLEN);
-}
-
 static nvlist_t *
 make_vdev_file(char *path, char *aux, char *pool, size_t size, uint64_t ashift)
 {
@@ -1240,15 +1153,15 @@ make_vdev_raid(char *path, char *aux, char *pool, size_t size,
 
 	if (strcmp(ztest_opts.zo_raid_type, VDEV_TYPE_DRAID) == 0) {
 		nvlist_t *draidcfg;
-		char *path;
-
-		path = umem_alloc(MAXPATHLEN, UMEM_NOFAIL);
-		(void) snprintf(path, MAXPATHLEN, "%s/%s", ztest_opts.zo_dir,
-		    DRAID_CONFIG);
-		draidcfg = draidcfg_read_file(path);
-		VERIFY(draidcfg != NULL);
-		VERIFY(vdev_draid_config_add(raid, draidcfg) == B_TRUE);
-		umem_free(path, MAXPATHLEN);
+		VERIFY3S(vdev_draid_config_generate(
+		    ztest_opts.zo_draid_groups, 0, ztest_opts.zo_raid_parity,
+		    ztest_opts.zo_draid_spares, ztest_opts.zo_raid_children,
+		    DRAIDCFG_DEFAULT_PASSES, DRAIDCFG_DEFAULT_EVAL,
+		    DRAIDCFG_DEFAULT_FAULTS, &draidcfg), ==, DRAIDCFG_OK);
+		VERIFY3P(draidcfg, !=, NULL);
+		VERIFY(nvlist_add_nvlist(raid, ZPOOL_CONFIG_DRAIDCFG,
+		    draidcfg) == 0);
+		vdev_draid_config_free(draidcfg);
 	}
 
 	for (c = 0; c < r; c++)

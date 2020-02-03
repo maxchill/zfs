@@ -45,8 +45,7 @@
 #include <sys/vdev_disk.h>
 #include <dlfcn.h>
 #include <libzutil.h>
-
-#include "draid_config.h"
+#include <zfs_draid.h>
 #include "zfs_namecheck.h"
 #include "zfs_prop.h"
 #include "libzfs_impl.h"
@@ -3179,10 +3178,10 @@ zpool_vdev_attach(zpool_handle_t *zhp,
 			if (islog)
 				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 				    "cannot replace a log with a spare"));
-			else if (new_disk[0] == VDEV_DRAID_SPARE_PATH_FMT[0])
+			else if (vdev_draid_is_spare(new_disk))
 				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-				    "dspare can only replace a child "
-				    "drive in its parent draid vdev"));
+				    "dRAID spares can only replace child "
+				    "devices in their parent's dRAID vdev"));
 			else if (version >= SPA_VERSION_MULTI_REPLACE)
 				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 				    "already in replacing/spare config; wait "
@@ -3576,9 +3575,9 @@ zpool_vdev_remove(zpool_handle_t *zhp, const char *path)
 	(void) snprintf(msg, sizeof (msg),
 	    dgettext(TEXT_DOMAIN, "cannot remove %s"), path);
 
-	if (path[0] == VDEV_DRAID_SPARE_PATH_FMT[0]) {
+	if (vdev_draid_is_spare(path)) {
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "dRAID spare cannot be removed"));
+		    "dRAID spares cannot be removed"));
 		return (zfs_error(hdl, EZFS_NODEVICE, msg));
 	}
 
@@ -3939,13 +3938,32 @@ zpool_vdev_name(libzfs_handle_t *hdl, zpool_handle_t *zhp, nvlist_t *nv,
 		/*
 		 * If it's a raidz device, we need to stick in the parity level.
 		 */
-		if (strcmp(path, VDEV_TYPE_RAIDZ) == 0 ||
-		    strcmp(path, VDEV_TYPE_DRAID) == 0) {
+		if (strcmp(path, VDEV_TYPE_RAIDZ) == 0) {
 			verify(nvlist_lookup_uint64(nv, ZPOOL_CONFIG_NPARITY,
 			    &value) == 0);
 			(void) snprintf(buf, sizeof (buf), "%s%llu", path,
 			    (u_longlong_t)value);
 			path = buf;
+		}
+
+		/*
+		 * If it's a dRAID device, we add parity, groups, and spares.
+		 */
+		if (strcmp(path, VDEV_TYPE_DRAID) == 0) {
+			uint64_t parity, groups, spares;
+			nvlist_t *cfg;
+
+			verify(nvlist_lookup_nvlist(nv, ZPOOL_CONFIG_DRAIDCFG,
+			    &cfg) == 0);
+			verify(nvlist_lookup_uint64(cfg,
+			    ZPOOL_CONFIG_DRAIDCFG_PARITY, &parity) == 0);
+			verify(nvlist_lookup_uint64(cfg,
+			    ZPOOL_CONFIG_DRAIDCFG_GROUPS, &groups) == 0);
+			verify(nvlist_lookup_uint64(cfg,
+			    ZPOOL_CONFIG_DRAIDCFG_SPARES, &spares) == 0);
+
+			path = vdev_draid_name(buf, sizeof (buf), parity,
+			    groups, spares, 0);
 		}
 
 		/*

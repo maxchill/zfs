@@ -298,13 +298,14 @@ vdev_get_min_asize(vdev_t *vd)
 		    pvd->vdev_children);
 
 	if (pvd->vdev_ops == &vdev_draid_ops) {
-		struct vdev_draid_configuration *cfg = pvd->vdev_tsd;
+		vdev_draid_config_t *vdc = pvd->vdev_tsd;
 
-		ASSERT(cfg != NULL);
-		ASSERT3U(pvd->vdev_nparity, ==, cfg->dcf_parity);
-		ASSERT3U(pvd->vdev_children, ==, cfg->dcf_children);
+		ASSERT3P(vdc, !=, NULL);
+		ASSERT3U(pvd->vdev_nparity, ==, vdc->vdc_parity);
+		ASSERT3U(pvd->vdev_children, ==, vdc->vdc_children);
+
 		return (pvd->vdev_min_asize /
-		    (pvd->vdev_children - cfg->dcf_spare));
+		    (pvd->vdev_children - vdc->vdc_spares));
 	}
 
 	return (pvd->vdev_min_asize);
@@ -726,8 +727,10 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
 			return (SET_ERROR(EINVAL));
 		}
 
-		if (vdev_draid_config_validate(NULL, draidcfg) != DRAIDCFG_OK)
+		if (vdev_draid_config_validate(draidcfg, 0, 0, 0, 0) !=
+		    DRAIDCFG_OK) {
 			return (SET_ERROR(EINVAL));
+		}
 
 		/* spa_vdev_add() expects feature to be enabled */
 		if (alloctype == VDEV_ALLOC_ADD &&

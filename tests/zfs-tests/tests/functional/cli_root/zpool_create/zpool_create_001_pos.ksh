@@ -67,7 +67,7 @@ log_assert "'zpool create <pool> <vspec> ...' can successfully create" \
 
 log_onexit cleanup
 
-set -A keywords "" "mirror" "raidz" "raidz1"
+set -A keywords "" "mirror" "raidz" "raidz1" "draid"
 
 case $DISK_ARRAY_NUM in
 0|1)
@@ -98,6 +98,7 @@ case $DISK_ARRAY_NUM in
 		${disk}${SLICE_PREFIX}${SLICE4}\"\
 		\"$TESTDIR0/$FILEDISK0 $TESTDIR1/$FILEDISK1\""
 	mirrordevs=$raidzdevs
+	draiddevs=$raidzdevs
 	;;
 2|*)
 	create_blockfile $FILESIZE $TESTDIR0/$FILEDISK0 \
@@ -127,6 +128,7 @@ case $DISK_ARRAY_NUM in
 		${DISK1}${SLICE_PREFIX}${SLICE1}\" \
 		\"$TESTDIR0/$FILEDISK0 $TESTDIR1/$FILEDISK1\""
 	mirrordevs=$raidzdevs
+	draiddevs=$raidzdevs
 	;;
 esac
 
@@ -139,6 +141,8 @@ while (( $i < ${#keywords[*]} )); do
 		create_pool_test "$TESTPOOL" "${keywords[i]}" "$mirrordevs";;
 	raidz|raidz1)
 		create_pool_test "$TESTPOOL" "${keywords[i]}" "$raidzdevs" ;;
+	draid|draid1)
+		create_pool_test "$TESTPOOL" "${keywords[i]}" "$draiddevs" ;;
 	esac
 	(( i = i+1 ))
 done

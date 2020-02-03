@@ -718,16 +718,6 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_HAS_PER_VDEV_ZAPS	"com.delphix:has_per_vdev_zaps"
 #define	ZPOOL_CONFIG_RESILVER_DEFER	"com.datto:resilver_defer"
 #define	ZPOOL_CONFIG_CACHEFILE		"cachefile"	/* not stored on disk */
-
-#define	ZPOOL_CONFIG_DRAIDCFG		"com.intel:draid_config"
-#define	ZPOOL_CONFIG_DRAIDCFG_DATA	"com.intel:draid_data"
-#define	ZPOOL_CONFIG_DRAIDCFG_PARITY	"com.intel:draid_parity"
-#define	ZPOOL_CONFIG_DRAIDCFG_SPARE	"com.intel:draid_spare"
-#define	ZPOOL_CONFIG_DRAIDCFG_BASE	"com.intel:draid_base"
-#define	ZPOOL_CONFIG_DRAIDCFG_CHILDREN	"com.intel:draid_children"
-#define	ZPOOL_CONFIG_DRAIDCFG_PERM	"com.intel:draid_perm"
-#define	ZPOOL_CONFIG_DRAIDCFG_GROUPS	"com.cray:draid_groups"
-
 #define	ZPOOL_CONFIG_MMP_STATE		"mmp_state"	/* not stored on disk */
 #define	ZPOOL_CONFIG_MMP_TXG		"mmp_txg"	/* not stored on disk */
 #define	ZPOOL_CONFIG_MMP_SEQ		"mmp_seq"	/* not stored on disk */
@@ -735,6 +725,7 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_MMP_HOSTID		"mmp_hostid"	/* not stored on disk */
 #define	ZPOOL_CONFIG_ALLOCATION_BIAS	"alloc_bias"	/* not stored on disk */
 #define	ZPOOL_CONFIG_EXPANSION_TIME	"expansion_time"	/* not stored */
+#define	ZPOOL_CONFIG_DRAIDCFG		"org.zfsonlinux:draid_config"
 
 /*
  * The persistent vdev state is stored as separate values rather than a single
@@ -759,6 +750,17 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_LOAD_TIME		"rewind_txg_ts"
 #define	ZPOOL_CONFIG_LOAD_DATA_ERRORS	"verify_data_errors"
 #define	ZPOOL_CONFIG_REWIND_TIME	"seconds_of_rewind"
+
+/* dRAID configuration stored in ZPOOL_CONFIG_DRAIDCFG nvlist */
+#define	ZPOOL_CONFIG_DRAIDCFG_GUID	"draid_guid"
+#define	ZPOOL_CONFIG_DRAIDCFG_SEED	"draid_seed"
+#define	ZPOOL_CONFIG_DRAIDCFG_DATA	"draid_data"
+#define	ZPOOL_CONFIG_DRAIDCFG_PARITY	"draid_parity"
+#define	ZPOOL_CONFIG_DRAIDCFG_SPARES	"draid_spares"
+#define	ZPOOL_CONFIG_DRAIDCFG_BASE	"draid_base"
+#define	ZPOOL_CONFIG_DRAIDCFG_CHILDREN	"draid_children"
+#define	ZPOOL_CONFIG_DRAIDCFG_PERM	"draid_perm"
+#define	ZPOOL_CONFIG_DRAIDCFG_GROUPS	"draid_groups"
 
 #define	VDEV_TYPE_ROOT			"root"
 #define	VDEV_TYPE_MIRROR		"mirror"

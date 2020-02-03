@@ -32,7 +32,7 @@
 #include <sys/vdev_impl.h>
 #include <sys/vdev_raidz_impl.h>
 
-#include "draid_config.h"
+#include <zfs_draid.h>
 
 #ifdef  __cplusplus
 extern "C" {
