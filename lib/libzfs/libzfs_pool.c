@@ -42,6 +42,7 @@
 #include <sys/efi_partition.h>
 #include <sys/systeminfo.h>
 #include <sys/zfs_ioctl.h>
+#include <sys/zfs_sysfs.h>
 #include <sys/vdev_disk.h>
 #include <dlfcn.h>
 #include <libzutil.h>
@@ -2397,6 +2398,32 @@ zpool_trim(zpool_handle_t *zhp, pool_trim_func_t cmd_type, nvlist_t *vds,
 }
 
 /*
+ * Restart, suspend, or cancel an in-progress rebuild operation.
+ */
+int
+zpool_rebuild(zpool_handle_t *zhp, pool_rebuild_func_t cmd_type,
+    rebuildflags_t *rebuild_flags)
+{
+	char msg[1024];
+	int error;
+
+	error = lzc_rebuild(zhp->zpool_name, cmd_type, rebuild_flags->rate);
+	if (error)
+		return (zpool_standard_error(zhp->zpool_hdl, error, msg));
+
+	if (rebuild_flags->wait) {
+		error = lzc_wait(zhp->zpool_name, ZPOOL_WAIT_REBUILD, NULL);
+		if (error) {
+			(void) zpool_standard_error_fmt(zhp->zpool_hdl,
+			    error, dgettext(TEXT_DOMAIN,
+			    "error waiting to rebuild '%s'"), zhp->zpool_name);
+		}
+	}
+
+	return (error);
+}
+
+/*
  * Scan the pool.
  */
 int
@@ -3137,8 +3164,8 @@ is_replacing_spare(nvlist_t *search, nvlist_t *tgt, int which)
  * If 'replacing' is specified, the new disk will replace the old one.
  */
 int
-zpool_vdev_attach(zpool_handle_t *zhp,
-    const char *old_disk, const char *new_disk, nvlist_t *nvroot, int replacing)
+zpool_vdev_attach(zpool_handle_t *zhp, const char *old_disk,
+    const char *new_disk, nvlist_t *nvroot, int replacing, boolean_t rebuild)
 {
 	zfs_cmd_t zc = {"\0"};
 	char msg[1024];
@@ -3173,6 +3200,14 @@ zpool_vdev_attach(zpool_handle_t *zhp,
 
 	verify(nvlist_lookup_uint64(tgt, ZPOOL_CONFIG_GUID, &zc.zc_guid) == 0);
 	zc.zc_cookie = replacing;
+	zc.zc_simple = rebuild;
+
+	if (rebuild &&
+	    zfeature_lookup_guid("org.openzfs:device_rebuild", NULL) != 0) {
+		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+		    "the loaded zfs module doesn't support device rebuilds"));
+		return (zfs_error(hdl, EZFS_POOL_NOTSUP, msg));
+	}
 
 	if (nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_CHILDREN,
 	    &child, &children) != 0 || children != 1) {
@@ -3233,20 +3268,25 @@ zpool_vdev_attach(zpool_handle_t *zhp,
 			uint64_t version = zpool_get_prop_int(zhp,
 			    ZPOOL_PROP_VERSION, NULL);
 
-			if (islog)
+			if (islog) {
 				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 				    "cannot replace a log with a spare"));
-			else if (vdev_draid_is_spare(new_disk))
+			} else if (rebuild) {
+				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+				    "only mirror and dRAID vdevs can "
+				    "linearly rebuild the device"));
+			} else if (vdev_draid_is_spare(new_disk)) {
 				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 				    "dRAID spares can only replace child "
 				    "devices in their parent's dRAID vdev"));
-			else if (version >= SPA_VERSION_MULTI_REPLACE)
+			} else if (version >= SPA_VERSION_MULTI_REPLACE) {
 				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 				    "already in replacing/spare config; wait "
 				    "for completion or use 'zpool detach'"));
-			else
+			} else {
 				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 				    "cannot replace a replacing device"));
+			}
 		} else {
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 			    "can only attach to mirrors and top-level "

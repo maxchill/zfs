@@ -57,6 +57,7 @@
 #include <sys/vdev_indirect_mapping.h>
 #include <sys/vdev_indirect_births.h>
 #include <sys/vdev_initialize.h>
+#include <sys/vdev_scan.h>
 #include <sys/vdev_trim.h>
 #include <sys/vdev_disk.h>
 #include <sys/vdev_draid_impl.h>
@@ -82,7 +83,6 @@
 #include <sys/spa_boot.h>
 #include <sys/zfs_ioctl.h>
 #include <sys/dsl_scan.h>
-#include <sys/vdev_scan.h>
 #include <sys/zfeature.h>
 #include <sys/dsl_destroy.h>
 #include <sys/zvol.h>
@@ -1558,13 +1558,13 @@ spa_unload(spa_t *spa)
 	 * Stop async tasks.
 	 */
 	spa_async_suspend(spa);
-	spa_vdev_scan_suspend(spa);
 
 	if (spa->spa_root_vdev) {
 		vdev_t *root_vdev = spa->spa_root_vdev;
 		vdev_initialize_stop_all(root_vdev, VDEV_INITIALIZE_ACTIVE);
 		vdev_trim_stop_all(root_vdev, VDEV_TRIM_ACTIVE);
 		vdev_autotrim_stop_all(spa);
+		vdev_scan_stop_wait(root_vdev, VDEV_SCAN_ACTIVE);
 	}
 
 	/*
@@ -1608,8 +1608,6 @@ spa_unload(spa_t *spa)
 	spa_destroy_aux_threads(spa);
 
 	spa_condense_fini(spa);
-
-	spa_vdev_scan_destroy(spa);
 
 	bpobj_close(&spa->spa_deferred_bpobj);
 
@@ -4838,8 +4836,7 @@ spa_load_impl(spa_t *spa, spa_import_type_t type, char **ereport)
 		 * Check all DTLs to see if anything needs resilvering.
 		 */
 		if (!dsl_scan_resilvering(spa->spa_dsl_pool) &&
-		    vdev_resilver_needed(spa->spa_root_vdev, NULL, NULL) &&
-		    spa_vdev_scan_restart(spa->spa_root_vdev) != 0)
+		    vdev_resilver_needed(spa->spa_root_vdev, NULL, NULL))
 			spa_async_request(spa, SPA_ASYNC_RESILVER);
 
 		/*
@@ -4872,6 +4869,7 @@ spa_load_impl(spa_t *spa, spa_import_type_t type, char **ereport)
 		vdev_initialize_restart(spa->spa_root_vdev);
 		vdev_trim_restart(spa->spa_root_vdev);
 		vdev_autotrim_restart(spa);
+		vdev_scan_restart(spa->spa_root_vdev, B_FALSE);
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
 	}
 
@@ -6399,6 +6397,7 @@ spa_export_common(char *pool, int new_state, nvlist_t **oldconfig,
 			vdev_initialize_stop_all(rvd, VDEV_INITIALIZE_ACTIVE);
 			vdev_trim_stop_all(rvd, VDEV_TRIM_ACTIVE);
 			vdev_autotrim_stop_all(spa);
+			vdev_scan_stop_wait(rvd, VDEV_SCAN_ACTIVE);
 		}
 
 		/*
@@ -6641,7 +6640,6 @@ spa_vdev_add(spa_t *spa, nvlist_t *nvroot)
 	return (0);
 }
 
-static int spa_rebuild_mirror = 0;
 /*
  * Attach a device to a mirror.  The arguments are the path to any device
  * in the mirror, and the nvroot for the new device.  If the path specifies
@@ -6656,7 +6654,8 @@ static int spa_rebuild_mirror = 0;
  * is automatically detached.
  */
 int
-spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing)
+spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing,
+    int rebuild)
 {
 	uint64_t txg, dtl_max_txg;
 	vdev_t *rvd __maybe_unused = spa->spa_root_vdev;
@@ -6665,14 +6664,10 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing)
 	char *oldvdpath, *newvdpath;
 	int newvd_isspare;
 	int error;
-	boolean_t rebuild = B_FALSE;
 
 	ASSERT(spa_writeable(spa));
 
 	txg = spa_vdev_enter(spa);
-
-	if (spa->spa_vdev_scan != NULL)
-		return (spa_vdev_exit(spa, NULL, txg, EBUSY));
 
 	oldvd = spa_lookup_by_guid(spa, guid, B_FALSE);
 
@@ -6714,6 +6709,14 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing)
 	 */
 	if (newvd->vdev_ops == &vdev_draid_spare_ops &&
 	    oldvd->vdev_top != vdev_draid_spare_get_parent(newvd)) {
+		return (spa_vdev_exit(spa, newrootvd, txg, ENOTSUP));
+	}
+
+	/*
+	 * Rebuilds are only allowed for dRAID and mirror vdevs.
+	 */
+	if (rebuild && oldvd->vdev_top->vdev_ops != &vdev_mirror_ops &&
+	    oldvd->vdev_top->vdev_ops != &vdev_draid_ops) {
 		return (spa_vdev_exit(spa, newrootvd, txg, ENOTSUP));
 	}
 
@@ -6776,7 +6779,7 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing)
 	 * than the top-level vdev.
 	 */
 	if (newvd->vdev_ashift > oldvd->vdev_top->vdev_ashift)
-		return (spa_vdev_exit(spa, newrootvd, txg, EDOM));
+		return (spa_vdev_exit(spa, newrootvd, txg, ENOTSUP));
 
 	/*
 	 * If this is an in-place replacement, update oldvd's path and devid
@@ -6851,23 +6854,22 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing)
 	 */
 	vdev_dirty(tvd, VDD_DTL, newvd, txg);
 
-	if ((newvd->vdev_ops == &vdev_draid_spare_ops && spa_rebuild_mirror) ||
-	    (tvd->vdev_ops == &vdev_mirror_ops && spa_rebuild_mirror != 0))
-		rebuild = B_TRUE; /* HH: let zpool cmd choose */
-
 	/*
-	 * Schedule the resilver to restart in the future. We do this to
-	 * ensure that dmu_sync-ed blocks have been stitched into the
-	 * respective datasets. We do not do this if resilvers have been
-	 * deferred.
+	 * Schedule the resilver or rebuild to restart in the future. We do
+	 * this to ensure that dmu_sync-ed blocks have been stitched into the
+	 * respective datasets.
 	 */
-	if (rebuild)
-		spa_vdev_scan_start(spa, oldvd, 0, dtl_max_txg);
-	else if (dsl_scan_resilvering(spa_get_dsl(spa)) &&
-	    spa_feature_is_enabled(spa, SPA_FEATURE_RESILVER_DEFER))
-		vdev_defer_resilver(newvd);
-	else
-		dsl_scan_restart_resilver(spa->spa_dsl_pool, dtl_max_txg);
+	if (rebuild) {
+		vdev_scan_rebuild(tvd, oldvd, B_FALSE);
+	} else {
+		if (dsl_scan_resilvering(spa_get_dsl(spa)) &&
+		    spa_feature_is_enabled(spa, SPA_FEATURE_RESILVER_DEFER)) {
+			vdev_defer_resilver(newvd);
+		} else {
+			dsl_scan_restart_resilver(spa->spa_dsl_pool,
+			    dtl_max_txg);
+		}
+	}
 
 	if (spa->spa_bootfs)
 		spa_event_notify(spa, newvd, NULL, ESC_ZFS_BOOTFS_VDEV_ATTACH);
@@ -7021,15 +7023,13 @@ spa_vdev_detach(spa_t *spa, uint64_t guid, uint64_t pguid, int replace_done)
 		unspare = B_TRUE;
 
 	/*
-	 * If we are detaching a draid spare that is being rebuilt, we need to
-	 * abort the rebuild thread.
+	 * If we are detaching a dRAID spare that is being rebuilt, we need
+	 * to cancel the rebuild thread.
 	 */
-	if (replace_done == 0 &&
-	    pvd->vdev_ops == &vdev_spare_ops &&
-	    vd->vdev_ops == &vdev_draid_spare_ops &&
-	    spa->spa_vdev_scan != NULL &&
-	    spa->spa_vdev_scan->svs_vd->vdev_parent == pvd)
-		spa->spa_vdev_scan->svs_thread_exit = B_TRUE;
+	if ((replace_done == 0) && (pvd->vdev_ops == &vdev_spare_ops) &&
+	    (vd->vdev_ops == &vdev_draid_spare_ops)) {
+		vdev_scan_stop_wait(vd->vdev_top, VDEV_SCAN_CANCELED);
+	}
 
 	/*
 	 * Erase the disk labels so the disk can be used for other things.
@@ -7392,6 +7392,53 @@ spa_vdev_trim(spa_t *spa, nvlist_t *nv, uint64_t cmd_type, uint64_t rate,
 	list_destroy(&vd_list);
 
 	return (total_errors);
+}
+
+/*
+ * Restart, cancel, suspend, or modify the rate of an in-progress rebuild.
+ */
+int
+spa_vdev_rebuild(spa_t *spa, uint64_t cmd_type, uint64_t rate)
+{
+	vdev_t *rvd = spa->spa_root_vdev;
+
+	/*
+	 * We hold the namespace lock through the whole function to prevent
+	 * any changes to the pool while we're starting/stopping scan threads.
+	 */
+	mutex_enter(&spa_namespace_lock);
+	spa_config_enter(spa, SCL_CONFIG | SCL_STATE, FTAG, RW_READER);
+
+	if (!vdev_scan_rebuilding(rvd)) {
+		spa_config_exit(spa, SCL_CONFIG | SCL_STATE, FTAG);
+		mutex_exit(&spa_namespace_lock);
+		return (SET_ERROR(ENOENT));
+	}
+
+	spa_config_exit(spa, SCL_CONFIG | SCL_STATE, FTAG);
+
+	switch (cmd_type) {
+	case POOL_REBUILD_RESTART:
+		vdev_scan_restart(rvd, B_TRUE);
+		break;
+	case POOL_REBUILD_CANCEL:
+		vdev_scan_stop_wait(rvd, VDEV_SCAN_CANCELED);
+		break;
+	case POOL_REBUILD_SUSPEND:
+		vdev_scan_stop_wait(rvd, VDEV_SCAN_SUSPENDED);
+		break;
+	case POOL_REBUILD_SET_RATE:
+		vdev_scan_set_rate(rvd, rate);
+		break;
+	default:
+		panic("invalid cmd_type %llu", (unsigned long long)cmd_type);
+	}
+
+	/* Sync out the scan state */
+	txg_wait_synced(spa->spa_dsl_pool, 0);
+	mutex_exit(&spa_namespace_lock);
+
+	return (0);
 }
 
 /*
@@ -7951,16 +7998,12 @@ spa_scan(spa_t *spa, pool_scan_func_t func)
 {
 	ASSERT(spa_config_held(spa, SCL_ALL, RW_WRITER) == 0);
 
-	if (func >= POOL_SCAN_FUNCS ||
-	    func == POOL_SCAN_NONE || func == POOL_SCAN_REBUILD)
+	if (func >= POOL_SCAN_FUNCS || func == POOL_SCAN_NONE)
 		return (SET_ERROR(ENOTSUP));
 
 	if (func == POOL_SCAN_RESILVER &&
 	    !spa_feature_is_enabled(spa, SPA_FEATURE_RESILVER_DEFER))
 		return (SET_ERROR(ENOTSUP));
-
-	if (spa->spa_vdev_scan != NULL)
-		return (SET_ERROR(EBUSY));
 
 	/*
 	 * If a resilver was requested, but there is no DTL on a
@@ -9602,6 +9645,10 @@ spa_activity_in_progress(spa_t *spa, zpool_wait_activity_t activity,
 		    is_scrub == (activity == ZPOOL_WAIT_SCRUB));
 		break;
 	}
+	case ZPOOL_WAIT_REBUILD:
+		*in_progress = vdev_scan_rebuilding(spa->spa_root_vdev) &&
+		    !vdev_scan_suspended(spa->spa_root_vdev);
+		break;
 	default:
 		panic("unrecognized value for activity %d", activity);
 	}
@@ -9801,9 +9848,6 @@ ZFS_MODULE_PARAM(zfs_spa, spa_, load_verify_data, INT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_spa, spa_, load_print_vdev_tree, INT, ZMOD_RW,
 	"Print vdev tree to zfs_dbgmsg during pool import");
-
-ZFS_MODULE_PARAM(zfs_spa, spa_, rebuild_mirror, INT, ZMOD_RW,
-	"Set to enable rebuild on mirror vdev");
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_batch_pct, UINT, ZMOD_RD,
 	"Percentage of CPUs to run an IO worker thread");

@@ -3632,7 +3632,7 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 	root = make_vdev_root(newpath, NULL, NULL, newvd == NULL ? newsize : 0,
 	    ashift, NULL, 0, 0, 1);
 
-	error = spa_vdev_attach(spa, oldguid, root, replacing);
+	error = spa_vdev_attach(spa, oldguid, root, replacing, B_FALSE);
 
 	nvlist_free(root);
 

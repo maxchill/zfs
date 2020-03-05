@@ -255,9 +255,6 @@ struct vdev {
 	boolean_t	vdev_ishole;	/* is a hole in the namespace	*/
 	uint64_t	vdev_top_zap;
 	vdev_alloc_bias_t vdev_alloc_bias; /* metaslab allocation bias	*/
-
-	/* dRAID related */
-	uint64_t	vdev_last_io;	/* lbolt of last non-scan I/O	*/
 	nvlist_t	*vdev_cfg;	/* dRAID configuration		*/
 
 	/* pool checkpoint related */
@@ -299,13 +296,42 @@ struct vdev {
 	uint64_t	vdev_trim_secure;	/* requested secure TRIM */
 	uint64_t	vdev_trim_action_time;	/* start and end time */
 
-	/* for limiting outstanding I/Os (initialize and TRIM) */
+	/*
+	 * Scan related (dRAID/mirror rebuild)
+	 *
+	 * The vdev_scan_*_guids are only used by dRAID as an optimization,
+	 * Furthermore, the array is sized to handle the worst case of 3
+	 * faults in a triple parity configration.
+	 */
+	boolean_t	vdev_scan_exit_wanted;
+	boolean_t	vdev_scan_reset_wanted;
+	vdev_scan_state_t	vdev_scan_state;
+	kmutex_t	vdev_scan_lock;
+	kcondvar_t	vdev_scan_cv;
+	kthread_t	*vdev_scan_thread;
+	uint64_t	vdev_scan_offset[TXG_SIZE];
+	uint64_t	vdev_scan_last_offset;
+	uint64_t	vdev_scan_fault_guids[3];  /* faulted vdev guids */
+	uint64_t	vdev_scan_defer_guids[3];  /* deferred vdev guids */
+	uint64_t	vdev_scan_start_time;	/* start time */
+	uint64_t	vdev_scan_end_time;	/* end time */
+	uint64_t	vdev_scan_action_time;	/* last action time */
+	uint64_t	vdev_scan_bytes_done;	/* bytes rebuilt */
+	uint64_t	vdev_scan_bytes_est;	/* total bytes to rebuild */
+	uint64_t	vdev_scan_errors;	/* errors during rebuild */
+	uint64_t	vdev_scan_rate_avg;	/* average rebuild rate */
+	uint64_t	vdev_scan_rate;		/* requested rate (bytes/sec) */
+
+	/* For limiting outstanding I/Os (initialize, TRIM, scan) */
 	kmutex_t	vdev_initialize_io_lock;
 	kcondvar_t	vdev_initialize_io_cv;
 	uint64_t	vdev_initialize_inflight;
 	kmutex_t	vdev_trim_io_lock;
 	kcondvar_t	vdev_trim_io_cv;
 	uint64_t	vdev_trim_inflight[2];
+	kmutex_t	vdev_scan_io_lock;
+	kcondvar_t	vdev_scan_io_cv;
+	uint64_t	vdev_scan_inflight;
 
 	/*
 	 * Values stored in the config for an indirect or removing vdev.
@@ -384,7 +410,8 @@ struct vdev {
 	boolean_t	vdev_isspare;	/* was a hot spare		*/
 	boolean_t	vdev_isl2cache;	/* was a l2cache device		*/
 	boolean_t	vdev_copy_uberblocks;  /* post expand copy uberblocks */
-	boolean_t	vdev_resilver_deferred;  /* resilver deferred */
+	boolean_t	vdev_resilver_deferred;	/* resilver deferred */
+	boolean_t	vdev_rebuild_deferred;	/* rebuild deferred */
 	vdev_queue_t	vdev_queue;	/* I/O deadline schedule queue	*/
 	vdev_cache_t	vdev_cache;	/* physical block cache		*/
 	spa_aux_vdev_t	*vdev_aux;	/* for l2cache and spares vdevs	*/
@@ -580,7 +607,6 @@ extern int vdev_obsolete_counts_are_precise(vdev_t *vd, boolean_t *are_precise);
  * Other miscellaneous functions
  */
 int vdev_checkpoint_sm_object(vdev_t *vd, uint64_t *sm_obj);
-int get_spa_vdev_scan_idle(void);
 
 #ifdef	__cplusplus
 }

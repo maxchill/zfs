@@ -360,6 +360,7 @@ static const char *zfs_kernel_features[] = {
 	/* --> Add new kernel features here */
 	"com.delphix:vdev_initialize",
 	"org.zfsonlinux:vdev_trim",
+	"org.openzfs:linear_rebuild",
 };
 
 #define	KERNEL_FEATURE_COUNT	ARRAY_SIZE(zfs_kernel_features)

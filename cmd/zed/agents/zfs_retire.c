@@ -237,7 +237,7 @@ replace_with_spare(fmd_hdl_t *hdl, zpool_handle_t *zhp, nvlist_t *vdev)
 		    dev_name, basename(spare_name));
 
 		if (zpool_vdev_attach(zhp, dev_name, spare_name,
-		    replacement, B_TRUE) == 0) {
+		    replacement, B_TRUE, B_FALSE) == 0) {
 			free(dev_name);
 			nvlist_free(replacement);
 			return (B_TRUE);

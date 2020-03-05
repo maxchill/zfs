@@ -405,6 +405,31 @@ root_vdev_actions_getprogress(vdev_t *vd, nvlist_t *nvl)
 	}
 }
 
+static void
+top_vdev_actions_getprogress(vdev_t *vd, nvlist_t *nvl)
+{
+	spa_t *spa = vd->vdev_spa;
+
+	if (vd != spa->spa_root_vdev)
+		return;
+
+	for (int c = 0; c < vd->vdev_children; c++) {
+		vdev_t *child = vd->vdev_child[c];
+		vdev_rebuild_stat_t vrs;
+
+		/* provide either current or previous rebuild information */
+		if (child->vdev_aux == NULL && child == child->vdev_top &&
+		    vdev_is_concrete(child)) {
+			if (vdev_scan_get_stats(vd, &vrs) == 0) {
+				fnvlist_add_uint64_array(nvl,
+				    ZPOOL_CONFIG_REBUILD_STATS,
+				    (uint64_t *)&vrs,
+				    sizeof (vrs) / sizeof (uint64_t));
+			}
+		}
+	}
+}
+
 /*
  * Generate the nvlist representing this vdev's config.
  */
@@ -568,6 +593,7 @@ vdev_config_generate(spa_t *spa, vdev_t *vd, boolean_t getstats,
 		vdev_config_generate_stats(vd, nv);
 
 		root_vdev_actions_getprogress(vd, nv);
+		top_vdev_actions_getprogress(vd, nv);
 
 		/*
 		 * Note: this can be called from open context

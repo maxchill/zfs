@@ -106,6 +106,7 @@ static int zpool_do_split(int, char **);
 static int zpool_do_initialize(int, char **);
 static int zpool_do_scrub(int, char **);
 static int zpool_do_resilver(int, char **);
+static int zpool_do_rebuild(int, char **);
 static int zpool_do_trim(int, char **);
 
 static int zpool_do_import(int, char **);
@@ -164,6 +165,7 @@ typedef enum {
 	HELP_REMOVE,
 	HELP_INITIALIZE,
 	HELP_SCRUB,
+	HELP_REBUILD,
 	HELP_RESILVER,
 	HELP_TRIM,
 	HELP_STATUS,
@@ -302,6 +304,7 @@ static zpool_command_t command_table[] = {
 	{ "split",	zpool_do_split,		HELP_SPLIT		},
 	{ NULL },
 	{ "initialize",	zpool_do_initialize,	HELP_INITIALIZE		},
+	{ "rebuild",	zpool_do_rebuild,	HELP_REBUILD		},
 	{ "resilver",	zpool_do_resilver,	HELP_RESILVER		},
 	{ "scrub",	zpool_do_scrub,		HELP_SCRUB		},
 	{ "trim",	zpool_do_trim,		HELP_TRIM		},
@@ -338,7 +341,7 @@ get_usage(zpool_help_t idx)
 		return (gettext("\tadd [-fgLnP] [-o property=value] "
 		    "<pool> <vdev> ...\n"));
 	case HELP_ATTACH:
-		return (gettext("\tattach [-fw] [-o property=value] "
+		return (gettext("\tattach [-frw] [-o property=value] "
 		    "<pool> <device> <new-device>\n"));
 	case HELP_CLEAR:
 		return (gettext("\tclear [-nF] <pool> [device]\n"));
@@ -381,7 +384,7 @@ get_usage(zpool_help_t idx)
 	case HELP_ONLINE:
 		return (gettext("\tonline [-e] <pool> <device> ...\n"));
 	case HELP_REPLACE:
-		return (gettext("\treplace [-fw] [-o property=value] "
+		return (gettext("\treplace [-frw] [-o property=value] "
 		    "<pool> <device> [new-device]\n"));
 	case HELP_REMOVE:
 		return (gettext("\tremove [-npsw] <pool> <device> ...\n"));
@@ -392,6 +395,9 @@ get_usage(zpool_help_t idx)
 		    "[<device> ...]\n"));
 	case HELP_SCRUB:
 		return (gettext("\tscrub [-s | -p] [-w] <pool> ...\n"));
+	case HELP_REBUILD:
+		return (gettext("\trebuild [-w] [-r <rate>] [-c | -s] "
+		    "<pool>\n"));
 	case HELP_RESILVER:
 		return (gettext("\tresilver <pool> ...\n"));
 	case HELP_TRIM:
@@ -1879,6 +1885,7 @@ typedef struct status_cbdata {
 	boolean_t	cb_print_slow_ios;
 	boolean_t	cb_print_vdev_init;
 	boolean_t	cb_print_vdev_trim;
+	boolean_t	cb_print_vdev_scan;
 	vdev_cmd_data_list_t	*vcdl;
 } status_cbdata_t;
 
@@ -2273,7 +2280,7 @@ print_status_config(zpool_handle_t *zhp, status_cbdata_t *cb, const char *name,
 		}
 	}
 
-	/* Display vdev initialization and trim status for leaves */
+	/* Display vdev initialization and trim status for leaves. */
 	if (children == 0) {
 		print_status_initialize(vs, cb->cb_print_vdev_init);
 		print_status_trim(vs, cb->cb_print_vdev_trim);
@@ -6092,6 +6099,7 @@ static int
 zpool_do_attach_or_replace(int argc, char **argv, int replacing)
 {
 	boolean_t force = B_FALSE;
+	boolean_t rebuild = B_FALSE;
 	boolean_t wait = B_FALSE;
 	int c;
 	nvlist_t *nvroot;
@@ -6102,7 +6110,7 @@ zpool_do_attach_or_replace(int argc, char **argv, int replacing)
 	int ret;
 
 	/* check options */
-	while ((c = getopt(argc, argv, "fo:w")) != -1) {
+	while ((c = getopt(argc, argv, "fo:rw")) != -1) {
 		switch (c) {
 		case 'f':
 			force = B_TRUE;
@@ -6119,6 +6127,9 @@ zpool_do_attach_or_replace(int argc, char **argv, int replacing)
 			if ((strcmp(optarg, ZPOOL_CONFIG_ASHIFT) != 0) ||
 			    (add_prop_list(optarg, propval, &props, B_TRUE)))
 				usage(B_FALSE);
+			break;
+		case 'r':
+			rebuild = B_TRUE;
 			break;
 		case 'w':
 			wait = B_TRUE;
@@ -6204,7 +6215,8 @@ zpool_do_attach_or_replace(int argc, char **argv, int replacing)
 		return (1);
 	}
 
-	ret = zpool_vdev_attach(zhp, old_disk, new_disk, nvroot, replacing);
+	ret = zpool_vdev_attach(zhp, old_disk, new_disk, nvroot, replacing,
+	    rebuild);
 
 	if (ret == 0 && wait)
 		ret = zpool_wait(zhp,
@@ -6218,9 +6230,10 @@ zpool_do_attach_or_replace(int argc, char **argv, int replacing)
 }
 
 /*
- * zpool replace [-fw] [-o property=value] <pool> <device> <new_device>
+ * zpool replace [-frw] [-o property=value] <pool> <device> <new_device>
  *
  *	-f	Force attach, even if <new_device> appears to be in use.
+ *	-r	Perform rebuild instead of default resilver operation.
  *	-o	Set property=value.
  *	-w	Wait for replacing to complete before returning
  *
@@ -6234,9 +6247,10 @@ zpool_do_replace(int argc, char **argv)
 }
 
 /*
- * zpool attach [-fw] [-o property=value] <pool> <device> <new_device>
+ * zpool attach [-frw] [-o property=value] <pool> <device> <new_device>
  *
  *	-f	Force attach, even if <new_device> appears to be in use.
+ *	-r	Perform rebuild instead of default resilver operation.
  *	-o	Set property=value.
  *	-w	Wait for resilvering to complete before returning
  *
@@ -6972,6 +6986,115 @@ zpool_do_resilver(int argc, char **argv)
 }
 
 /*
+ * zpool rebuild [-w] [-r <rate>] [-c | -s] <pool>
+ *
+ *	-c		Cancel. Ends any in-progress rebuild.
+ *	-r <rate>	Sets the rebuild rate in bytes (per second). Supports
+ *			adding a multiplier suffix such as 'k' or 'm'.
+ *	-s		Suspend. Rebuild can then be restarted with no flags.
+ *	-w		Wait. Blocks until rebuilding has completed.
+ */
+int
+zpool_do_rebuild(int argc, char **argv)
+{
+	struct option long_options[] = {
+		{"cancel",	no_argument,		NULL,	'c'},
+		{"rate",	required_argument,	NULL,	'r'},
+		{"suspend",	no_argument,		NULL,	's'},
+		{"wait",	no_argument,		NULL,	'w'},
+		{0, 0, 0, 0}
+	};
+
+	pool_rebuild_func_t cmd_type = POOL_REBUILD_RESTART;
+	uint64_t rate = 0;
+	boolean_t wait = B_FALSE;
+
+	int c;
+	while ((c = getopt_long(argc, argv, "cr:sw", long_options, NULL))
+	    != -1) {
+		switch (c) {
+		case 'c':
+			if (cmd_type != POOL_REBUILD_RESTART &&
+			    cmd_type != POOL_REBUILD_CANCEL) {
+				(void) fprintf(stderr, gettext("-c cannot be "
+				    "combined with other options\n"));
+				usage(B_FALSE);
+			}
+			cmd_type = POOL_REBUILD_CANCEL;
+			break;
+		case 'r':
+			if (cmd_type != POOL_REBUILD_RESTART &&
+			    cmd_type != POOL_REBUILD_SET_RATE) {
+				(void) fprintf(stderr, gettext("-r cannot be "
+				    "combined with the -c or -s options\n"));
+				usage(B_FALSE);
+			}
+			if (zfs_nicestrtonum(NULL, optarg, &rate) == -1) {
+				(void) fprintf(stderr,
+				    gettext("invalid value for rate\n"));
+				usage(B_FALSE);
+			}
+			cmd_type = POOL_REBUILD_SET_RATE;
+			break;
+		case 's':
+			if (cmd_type != POOL_REBUILD_RESTART &&
+			    cmd_type != POOL_REBUILD_SUSPEND) {
+				(void) fprintf(stderr, gettext("-s cannot be "
+				    "combined with other options\n"));
+				usage(B_FALSE);
+			}
+			cmd_type = POOL_REBUILD_SUSPEND;
+			break;
+		case 'w':
+			wait = B_TRUE;
+			break;
+		case '?':
+			if (optopt != 0) {
+				(void) fprintf(stderr,
+				    gettext("invalid option '%c'\n"), optopt);
+			} else {
+				(void) fprintf(stderr,
+				    gettext("invalid option '%s'\n"),
+				    argv[optind - 1]);
+			}
+			usage(B_FALSE);
+		}
+	}
+
+	argc -= optind;
+	argv += optind;
+
+	if (argc < 1) {
+		(void) fprintf(stderr, gettext("missing pool name argument\n"));
+		usage(B_FALSE);
+		return (-1);
+	}
+
+	if (wait && (cmd_type != POOL_REBUILD_RESTART)) {
+		(void) fprintf(stderr, gettext("-w cannot be used with -c or "
+		    "-s\n"));
+		usage(B_FALSE);
+	}
+
+	char *poolname = argv[0];
+	zpool_handle_t *zhp = zpool_open(g_zfs, poolname);
+	if (zhp == NULL)
+		return (-1);
+
+	rebuildflags_t rebuild_flags = {
+		.rate = rate,
+		.wait = wait,
+	};
+
+	int error = zpool_rebuild(zhp, cmd_type, &rebuild_flags);
+
+	zpool_close(zhp);
+
+	return (error);
+}
+
+
+/*
  * zpool trim [-d] [-r <rate>] [-c | -s] <pool> [<device> ...]
  *
  *	-c		Cancel. Ends any in-progress trim.
@@ -7106,19 +7229,34 @@ zpool_do_trim(int argc, char **argv)
 }
 
 /*
+ * Converts a total number of seconds to a human readable string broken
+ * down in to days/hours/minutes/seconds.
+ */
+static void
+secs_to_dhms(uint64_t total, char *buf)
+{
+	uint64_t days = total / 60 / 60 / 24;
+	uint64_t hours = (total / 60 / 60) % 24;
+	uint64_t mins = (total / 60) % 60;
+	uint64_t secs = (total % 60);
+
+	(void) sprintf(buf, "%llu days %02llu:%02llu:%02llu",
+	    (u_longlong_t)days, (u_longlong_t)hours,
+	    (u_longlong_t)mins, (u_longlong_t)secs);
+}
+
+/*
  * Print out detailed scrub status.
  */
 static void
 print_scan_status(pool_scan_stat_t *ps)
 {
 	time_t start, end, pause;
-	uint64_t total_secs_left;
-	uint64_t elapsed, secs_left, mins_left, hours_left, days_left;
 	uint64_t pass_scanned, scanned, pass_issued, issued, total;
-	uint64_t scan_rate, issue_rate;
+	uint64_t elapsed, scan_rate, issue_rate;
 	double fraction_done;
 	char processed_buf[7], scanned_buf[7], issued_buf[7], total_buf[7];
-	char srate_buf[7], irate_buf[7];
+	char srate_buf[7], irate_buf[7], time_buf[32];
 
 	printf("  ");
 	printf_color(ANSI_BOLD, gettext("scan:"));
@@ -7138,38 +7276,22 @@ print_scan_status(pool_scan_stat_t *ps)
 	zfs_nicebytes(ps->pss_processed, processed_buf, sizeof (processed_buf));
 
 	assert(ps->pss_func == POOL_SCAN_SCRUB ||
-	    ps->pss_func == POOL_SCAN_RESILVER ||
-	    ps->pss_func == POOL_SCAN_REBUILD);
+	    ps->pss_func == POOL_SCAN_RESILVER);
 
 	/* Scan is finished or canceled. */
 	if (ps->pss_state == DSS_FINISHED) {
-		total_secs_left = end - start;
-		days_left = total_secs_left / 60 / 60 / 24;
-		hours_left = (total_secs_left / 60 / 60) % 24;
-		mins_left = (total_secs_left / 60) % 60;
-		secs_left = (total_secs_left % 60);
+		secs_to_dhms(end - start, time_buf);
 
 		if (ps->pss_func == POOL_SCAN_SCRUB) {
 			(void) printf(gettext("scrub repaired %s "
-			    "in %llu days %02llu:%02llu:%02llu "
-			    "with %llu errors on %s"), processed_buf,
-			    (u_longlong_t)days_left, (u_longlong_t)hours_left,
-			    (u_longlong_t)mins_left, (u_longlong_t)secs_left,
-			    (u_longlong_t)ps->pss_errors, ctime(&end));
+			    "in %s with %llu errors on %s"), processed_buf,
+			    time_buf, (u_longlong_t)ps->pss_errors,
+			    ctime(&end));
 		} else if (ps->pss_func == POOL_SCAN_RESILVER) {
 			(void) printf(gettext("resilvered %s "
-			    "in %llu days %02llu:%02llu:%02llu "
-			    "with %llu errors on %s"), processed_buf,
-			    (u_longlong_t)days_left, (u_longlong_t)hours_left,
-			    (u_longlong_t)mins_left, (u_longlong_t)secs_left,
-			    (u_longlong_t)ps->pss_errors, ctime(&end));
-		} else if (ps->pss_func == POOL_SCAN_REBUILD) {
-			(void) printf(gettext("rebuilt %s "
-			    "in %llu days %02llu:%02llu:%02llu "
-			    "with %llu errors on %s"), processed_buf,
-			    (u_longlong_t)days_left, (u_longlong_t)hours_left,
-			    (u_longlong_t)mins_left, (u_longlong_t)secs_left,
-			    (u_longlong_t)ps->pss_errors, ctime(&end));
+			    "in %s with %llu errors on %s"), processed_buf,
+			    time_buf, (u_longlong_t)ps->pss_errors,
+			    ctime(&end));
 		}
 		return;
 	} else if (ps->pss_state == DSS_CANCELED) {
@@ -7178,9 +7300,6 @@ print_scan_status(pool_scan_stat_t *ps)
 			    ctime(&end));
 		} else if (ps->pss_func == POOL_SCAN_RESILVER) {
 			(void) printf(gettext("resilver canceled on %s"),
-			    ctime(&end));
-		} else if (ps->pss_func == POOL_SCAN_REBUILD) {
-			(void) printf(gettext("rebuild canceled on %s"),
 			    ctime(&end));
 		}
 		return;
@@ -7202,9 +7321,6 @@ print_scan_status(pool_scan_stat_t *ps)
 	} else if (ps->pss_func == POOL_SCAN_RESILVER) {
 		(void) printf(gettext("resilver in progress since %s"),
 		    ctime(&start));
-	} else if (ps->pss_func == POOL_SCAN_REBUILD) {
-		(void) printf(gettext("rebuild in progress since %s"),
-		    ctime(&start));
 	}
 
 	scanned = ps->pss_examined;
@@ -7213,21 +7329,8 @@ print_scan_status(pool_scan_stat_t *ps)
 	pass_issued = ps->pss_pass_issued;
 	total = ps->pss_to_examine;
 
-	if (ps->pss_func == POOL_SCAN_REBUILD) {
-		/*
-		 * "issued" only corresponds to a fraction of the
-		 * the total scanned pool size (just for the blocks that
-		 * needs to be rebuilt). So using "scanned" to calculate
-		 * the percent complete.
-		 */
-		fraction_done = (double)scanned / total;
-	} else {
-		/*
-		 * we are only done with a block once we have issued
-		 * the IO for it
-		 */
-		fraction_done = (double)issued / total;
-	}
+	/* we are only done with a block once we have issued the IO for it */
+	fraction_done = (double)issued / total;
 
 	/* elapsed time for this pass, rounding up to 1 if it's 0 */
 	elapsed = time(NULL) - ps->pss_pass_start;
@@ -7236,13 +7339,9 @@ print_scan_status(pool_scan_stat_t *ps)
 
 	scan_rate = pass_scanned / elapsed;
 	issue_rate = pass_issued / elapsed;
-	total_secs_left = (issue_rate != 0 && total >= issued) ?
+	uint64_t total_secs_left = (issue_rate != 0 && total >= issued) ?
 	    ((total - issued) / issue_rate) : UINT64_MAX;
-
-	days_left = total_secs_left / 60 / 60 / 24;
-	hours_left = (total_secs_left / 60 / 60) % 24;
-	mins_left = (total_secs_left / 60) % 60;
-	secs_left = (total_secs_left % 60);
+	secs_to_dhms(total_secs_left, time_buf);
 
 	/* format all of the numbers we will be reporting */
 	zfs_nicebytes(scanned, scanned_buf, sizeof (scanned_buf));
@@ -7267,24 +7366,110 @@ print_scan_status(pool_scan_stat_t *ps)
 	} else if (ps->pss_func == POOL_SCAN_SCRUB) {
 		(void) printf(gettext("\t%s repaired, %.2f%% done"),
 		    processed_buf, 100 * fraction_done);
-	} else if (ps->pss_func == POOL_SCAN_REBUILD) {
-		(void) printf(gettext("\t%s rebuilt, %.2f%% done"),
-		    processed_buf, 100 * fraction_done);
 	}
 
 	if (pause == 0) {
 		if (total_secs_left != UINT64_MAX &&
 		    issue_rate >= 10 * 1024 * 1024) {
-			(void) printf(gettext(", %llu days "
-			    "%02llu:%02llu:%02llu to go\n"),
-			    (u_longlong_t)days_left, (u_longlong_t)hours_left,
-			    (u_longlong_t)mins_left, (u_longlong_t)secs_left);
+			(void) printf(gettext(", %s to go\n"), time_buf);
 		} else {
 			(void) printf(gettext(", no estimated "
 			    "completion time\n"));
 		}
 	} else {
 		(void) printf(gettext("\n"));
+	}
+}
+
+static void
+print_rebuild_status_impl(vdev_rebuild_stat_t *vrs, char *vdev_name)
+{
+	if (vrs == NULL || vrs->vrs_state == VDEV_SCAN_NONE)
+		return;
+
+	printf("  ");
+	printf_color(ANSI_BOLD, gettext("scan:"));
+	printf(" ");
+
+	time_t start = vrs->vrs_start_time;
+	time_t end = vrs->vrs_end_time;
+	time_t pause = vrs->vrs_action_time;
+
+	uint64_t bytes_done = vrs->vrs_bytes_done;
+	uint64_t bytes_est = vrs->vrs_bytes_est;
+	uint64_t scan_rate = vrs->vrs_rate_avg;
+	double scan_pct = ((double)bytes_done * 100 / (bytes_est + 1));
+
+	/* Format all of the numbers we will be reporting */
+	char bytes_done_buf[7], bytes_est_buf[7];
+	char scan_rate_buf[7], time_buf[32];
+	zfs_nicebytes(bytes_done, bytes_done_buf, sizeof (bytes_done_buf));
+	zfs_nicebytes(bytes_est, bytes_est_buf, sizeof (bytes_est_buf));
+	zfs_nicebytes(scan_rate, scan_rate_buf, sizeof (scan_rate_buf));
+
+	/* Rebuild is finished or canceled. */
+	if (vrs->vrs_state == VDEV_SCAN_COMPLETE) {
+		secs_to_dhms(end - start, time_buf);
+		(void) printf(gettext("%s rebuilt %s in %s with %llu errors "
+		    "on %s"), vdev_name, bytes_done_buf, time_buf,
+		    (u_longlong_t)vrs->vrs_errors, ctime(&end));
+		return;
+	} else if (vrs->vrs_state == VDEV_SCAN_CANCELED) {
+		(void) printf(gettext("%s rebuild canceled on %s"),
+		    vdev_name, ctime(&end));
+		return;
+	} else if (vrs->vrs_state == VDEV_SCAN_SUSPENDED) {
+		(void) printf(gettext("%s rebuild paused since %s"),
+		    vdev_name, ctime(&pause));
+		(void) printf(gettext("\t%s rebuild started on %s"),
+		    vdev_name, ctime(&start));
+	} else if (vrs->vrs_state == VDEV_SCAN_ACTIVE) {
+		(void) printf(gettext("%s rebuild in progress since %s"),
+		    vdev_name, ctime(&start));
+	}
+
+	secs_to_dhms((bytes_est - bytes_done) / MAX(scan_rate, 1), time_buf);
+
+	(void) printf(gettext("\t%s %s rebuilt at %s/s, %s total\n"),
+	    vdev_name, bytes_done_buf, scan_rate_buf, bytes_est_buf);
+	(void) printf(gettext("\t%s %.2f%% done"), vdev_name, scan_pct);
+
+	if (vrs->vrs_state == VDEV_SCAN_ACTIVE) {
+		if (scan_rate >= 10 * 1024 * 1024) {
+			(void) printf(gettext(", %s to go\n"), time_buf);
+		} else {
+			(void) printf(gettext(", no estimated "
+			    "completion time\n"));
+		}
+	} else {
+		(void) printf(gettext("\n"));
+	}
+}
+
+/*
+ * Print scan/rebuild status for top-level vdevs.
+ */
+static void
+print_rebuild_status(zpool_handle_t *zhp, nvlist_t *nvroot)
+{
+	nvlist_t **child;
+	uint_t c, children;
+
+	if (nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_CHILDREN,
+	    &child, &children) == 0) {
+
+		for (c = 0; c < children; c++) {
+			vdev_rebuild_stat_t *vrs = NULL;
+			char *name;
+			uint_t i;
+
+			name = zpool_vdev_name(g_zfs, zhp, child[i],
+			    VDEV_NAME_TYPE_ID);
+			(void) nvlist_lookup_uint64_array(child[i],
+			    ZPOOL_CONFIG_REBUILD_STATS, (uint64_t **)&vrs, &i);
+			print_rebuild_status_impl(vrs, name);
+			free(name);
+		}
 	}
 }
 
@@ -7958,12 +8143,14 @@ status_callback(zpool_handle_t *zhp, void *data)
 		pool_removal_stat_t *prs = NULL;
 
 		(void) nvlist_lookup_uint64_array(nvroot,
+		    ZPOOL_CONFIG_SCAN_STATS, (uint64_t **)&ps, &c);
+		print_scan_status(ps);
+		print_rebuild_status(zhp, nvroot);
+
+		(void) nvlist_lookup_uint64_array(nvroot,
 		    ZPOOL_CONFIG_CHECKPOINT_STATS, (uint64_t **)&pcs, &c);
 		(void) nvlist_lookup_uint64_array(nvroot,
-		    ZPOOL_CONFIG_SCAN_STATS, (uint64_t **)&ps, &c);
-		(void) nvlist_lookup_uint64_array(nvroot,
 		    ZPOOL_CONFIG_REMOVAL_STATS, (uint64_t **)&prs, &c);
-		print_scan_status(ps);
 		print_checkpoint_scan_warning(ps, pcs);
 		print_removal_status(zhp, prs);
 		print_checkpoint_status(pcs);
@@ -9599,7 +9786,7 @@ print_wait_status_row(wait_data_t *wd, zpool_handle_t *zhp, int row)
 	pool_scan_stat_t *pss = NULL;
 	pool_removal_stat_t *prs = NULL;
 	char *headers[] = {"DISCARD", "FREE", "INITIALIZE", "REPLACE",
-	    "REMOVE", "RESILVER", "SCRUB", "TRIM"};
+	    "REMOVE", "RESILVER", "SCRUB", "TRIM", "REBUILD"};
 	int col_widths[ZPOOL_WAIT_NUM_ACTIVITIES];
 
 	/* Calculate the width of each column */
@@ -9786,7 +9973,7 @@ zpool_do_wait(int argc, char **argv)
 		{
 			static char *col_subopts[] = { "discard", "free",
 			    "initialize", "replace", "remove", "resilver",
-			    "scrub", "trim", NULL };
+			    "scrub", "trim", "rebuild", NULL };
 
 			/* Reset activities array */
 			bzero(&wd.wd_enabled, sizeof (wd.wd_enabled));

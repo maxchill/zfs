@@ -19,7 +19,9 @@
  * CDDL HEADER END
  */
 /*
+ *
  * Copyright (c) 2018, Intel Corporation.
+ * Copyright (c) 2020 by Lawrence Livermore National Security, LLC.
  */
 
 #include <sys/vdev_impl.h>
@@ -33,87 +35,326 @@
 #include <sys/arc.h>
 #include <sys/zap.h>
 
-static void
-spa_vdev_scan_done(zio_t *zio)
+/*
+ * XXX - Explain scanning rebuild feature.
+ */
+
+
+/*
+ * Maximum size of scan I/Os.  Individual I/Os may be smaller due to the
+ * maxmimum pool block size and additional alignment restrictions.
+ */
+unsigned int zfs_scan_extent_bytes_max = SPA_MAXBLOCKSIZE;
+
+/*
+ * Maximum number of queued scan I/Os top-level vdev.  The number of
+ * concurrent scan I/Os issued to the device is controlled by the
+ * zfs_vdev_scrub_min_active and zfs_vdev_scrub_max_active module options.
+ */
+unsigned int zfs_scan_queue_limit = 20;
+
+/*
+ * The scan_args are a control structure which describe how a top-level vdev
+ * should be rebuilt.  The core elements are the vdev, the metaslab being
+ * rebuilt and a range tree containing the allocted extents.  All provided
+ * ranges must be within the metaslab.
+ */
+typedef struct scan_args {
+	vdev_t		*scan_vdev;		/* Top-level vdev to rebuild */
+	metaslab_t	*scan_msp;		/* Disabled metaslab */
+	range_tree_t	*scan_tree;		/* Scan ranges (in metaslab) */
+	uint64_t	scan_extent_bytes_max;	/* Maximum rebuild I/O size */
+
+	/*
+	 * These fields are updated by vdev_scan_ranges().
+	 */
+	hrtime_t	scan_start_time;	/* Start time */
+	uint64_t	scan_bytes_done;	/* Bytes rebuilt */
+	vdev_t		*scan_fault_vdevs[3];	/* Faulted vdevs */
+	uint64_t	scan_faults;		/* Total faulted vdevs */
+} scan_args_t;
+
+/*
+ * Determines whether a vdev_scan_thread() should be stopped.
+ */
+static boolean_t
+vdev_scan_should_stop(vdev_t *tvd)
 {
-	spa_t *spa = zio->io_spa;
-	dsl_scan_t *scn = spa->spa_dsl_pool->dp_scan;
-	spa_vdev_scan_t *svs = zio->io_private;
-	uint64_t asize;
-
-	ASSERT(svs != NULL);
-	ASSERT(svs->svs_thread != NULL);
-	ASSERT(zio->io_bp != NULL);
-
-	abd_free(zio->io_abd);
-	asize = DVA_GET_ASIZE(&zio->io_bp->blk_dva[0]);
-
-	scn->scn_phys.scn_examined += asize;
-	spa->spa_scan_pass_exam += asize;
-	spa->spa_scan_pass_issued += asize;
-
-	if (zio->io_error && (zio->io_error != ECKSUM ||
-	    !(zio->io_flags & ZIO_FLAG_SPECULATIVE))) {
-		spa->spa_dsl_pool->dp_scan->scn_phys.scn_errors++;
-	}
-
-	mutex_enter(&svs->svs_io_lock);
-	ASSERT3U(svs->svs_io_asize, >=, asize);
-	svs->svs_io_asize -= asize;
-	cv_broadcast(&svs->svs_io_cv);
-	mutex_exit(&svs->svs_io_lock);
+	return (tvd->vdev_scan_exit_wanted || !vdev_writeable(tvd) ||
+	    tvd->vdev_top->vdev_removing);
 }
 
-static int spa_vdev_scan_delay = 64; /* number of ticks to delay rebuild */
-static int spa_vdev_scan_idle = 512; /* idle window in clock ticks */
+static void
+vdev_scan_set_guid_impl(uint64_t *guid_array, uint64_t guid, int idx)
+{
+	ASSERT(idx >= -2 && idx <= 2);
+
+	if (idx == -1) {
+		/* Set all values to fault guid */
+		for (int i = 0; i <= 2; i++)
+			guid_array[i] = guid;
+
+	} else if (idx == -2) {
+		/* Set next zero value to fault guid */
+		for (int i = 0; i <= 2; i++) {
+			if (guid_array[i] == 0)
+				guid_array[i] = guid;
+		}
+	} else {
+		/* Set specified index to fault guid */
+		guid_array[idx] = guid;
+	}
+}
 
 static void
-spa_vdev_scan_rebuild_block(spa_vdev_scan_t *svs, zio_t *pio,
-    vdev_t *vd, uint64_t offset, uint64_t asize)
+vdev_scan_set_fault_guid(vdev_t *vd, uint64_t guid, int idx)
 {
-	blkptr_t blk, *bp = &blk;
-	dva_t *dva = bp->blk_dva;
-	int scan_delay = spa_vdev_scan_delay;
-	uint64_t psize;
+	vdev_scan_set_guid_impl(vd->vdev_scan_fault_guids, guid, idx);
+}
+
+static void
+vdev_scan_set_defer_guid(vdev_t *vd, uint64_t guid, int idx)
+{
+	vdev_scan_set_guid_impl(vd->vdev_scan_defer_guids, guid, idx);
+}
+
+/*
+ * The sync task for updating the on-disk state of a scan.  This is scheduled
+ * by vdev_scan_change_state() and vdev_scan_range().
+ */
+static void
+vdev_scan_zap_update_sync(void *arg, dmu_tx_t *tx)
+{
+	uint64_t txg = dmu_tx_get_txg(tx);
+	vdev_t *vd = arg;
+
+	if (vd == NULL || vd->vdev_removing)
+		return;
+
+	uint64_t last_offset = vd->vdev_scan_offset[txg & TXG_MASK];
+	vd->vdev_scan_offset[txg & TXG_MASK] = 0;
+
+	VERIFY(vd->vdev_top == vd);
+
 	spa_t *spa = vd->vdev_spa;
+	objset_t *mos = spa->spa_meta_objset;
+
+	if (last_offset > 0 || vd->vdev_scan_last_offset == UINT64_MAX) {
+
+		if (vd->vdev_scan_last_offset == UINT64_MAX)
+			last_offset = 0;
+
+		vd->vdev_scan_last_offset = last_offset;
+		VERIFY0(zap_update(mos, vd->vdev_top_zap,
+		    VDEV_TOP_ZAP_SCAN_LAST_OFFSET,
+		    sizeof (last_offset), 1, &last_offset, tx));
+	}
+
+	if (vd->vdev_scan_rate > 0) {
+		uint64_t rate = (uint64_t)vd->vdev_scan_rate;
+
+		if (rate == UINT64_MAX)
+			rate = 0;
+
+		VERIFY0(zap_update(mos, vd->vdev_top_zap,
+		    VDEV_TOP_ZAP_SCAN_RATE, sizeof (rate), 1, &rate, tx));
+	}
+
+	VERIFY0(zap_update(mos, vd->vdev_top_zap,
+	    VDEV_TOP_ZAP_SCAN_FAULT_GUIDS, sizeof (uint64_t), 3,
+	    vd->vdev_scan_fault_guids, tx));
+
+	VERIFY0(zap_update(mos, vd->vdev_top_zap,
+	    VDEV_TOP_ZAP_SCAN_DEFER_GUIDS, sizeof (uint64_t), 3,
+	    vd->vdev_scan_defer_guids, tx));
+
+	VERIFY0(zap_update(mos, vd->vdev_top_zap, VDEV_TOP_ZAP_SCAN_START_TIME,
+	    sizeof (uint64_t), 1, &vd->vdev_scan_start_time, tx));
+
+	VERIFY0(zap_update(mos, vd->vdev_top_zap, VDEV_TOP_ZAP_SCAN_END_TIME,
+	    sizeof (uint64_t), 1, &vd->vdev_scan_end_time, tx));
+
+	VERIFY0(zap_update(mos, vd->vdev_top_zap, VDEV_TOP_ZAP_SCAN_ACTION_TIME,
+	    sizeof (uint64_t), 1, &vd->vdev_scan_action_time, tx));
+
+	VERIFY0(zap_update(mos, vd->vdev_top_zap, VDEV_TOP_ZAP_SCAN_STATE,
+	    sizeof (uint64_t), 1, &vd->vdev_scan_state, tx));
+}
+
+/*
+ * Update the on-disk state of a scan.  This is called to request that a scan
+ * be started/suspended/canceled, or to change one of the scan options (rate).
+ */
+static void
+vdev_scan_change_state(vdev_t *vd, vdev_scan_state_t new_state,
+    uint64_t rate, vdev_t *fault_vdev, boolean_t defer)
+{
+	ASSERT(MUTEX_HELD(&vd->vdev_scan_lock));
+	ASSERT(vd->vdev_top == vd);
+	spa_t *spa = vd->vdev_spa;
+
+	/*
+	 * Update the last action time when changing state.
+	 */
+	if (new_state != vd->vdev_scan_state)
+		vd->vdev_scan_action_time = gethrestime_sec();
+
+	/*
+	 * If we're activating, then preserve the requested rate and scan
+	 * method.  Setting the last offset and rate to UINT64_MAX is used
+	 * as a sentinel to indicate they should be reset to default values.
+	 */
+	if (new_state == VDEV_SCAN_ACTIVE) {
+		if (vd->vdev_scan_state == VDEV_SCAN_NONE ||
+		    vd->vdev_scan_state == VDEV_SCAN_COMPLETE ||
+		    vd->vdev_scan_state == VDEV_SCAN_CANCELED) {
+			vd->vdev_scan_last_offset = UINT64_MAX;
+			vd->vdev_scan_rate = UINT64_MAX;
+			vd->vdev_scan_start_time = gethrestime_sec();
+			vd->vdev_scan_end_time = 0;
+			vd->vdev_scan_action_time = vd->vdev_scan_start_time;
+			vdev_scan_set_fault_guid(vd, 0, -1);
+			vdev_scan_set_defer_guid(vd, 0, -1);
+		}
+
+		if (rate != 0)
+			vd->vdev_scan_rate = rate;
+
+		if (fault_vdev != NULL) {
+			uint64_t guid = fault_vdev->vdev_guid;
+
+			ASSERT(fault_vdev->vdev_ops->vdev_op_leaf);
+			ASSERT(vd == fault_vdev->vdev_top);
+			ASSERT(vdev_is_concrete(fault_vdev));
+
+			if (defer) {
+				vdev_scan_set_defer_guid(vd, guid, -2);
+			} else {
+				/*
+				 * When adding a new faulted guid the scan
+				 * must be restarted in order to rebuild
+				 * skipped dRAID permutation groups.
+				 */
+				vd->vdev_scan_last_offset = UINT64_MAX;
+				vdev_scan_set_fault_guid(vd, guid, -2);
+			}
+		}
+	} else if (new_state == VDEV_SCAN_COMPLETE ||
+	    new_state == VDEV_SCAN_CANCELED) {
+		vd->vdev_scan_end_time = gethrestime_sec();
+	}
+
+	boolean_t resumed = !!(vd->vdev_scan_state == VDEV_SCAN_SUSPENDED);
+	vd->vdev_scan_state = new_state;
+
+	dmu_tx_t *tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
+	VERIFY0(dmu_tx_assign(tx, TXG_WAIT));
+	dsl_sync_task_nowait(spa_get_dsl(spa), vdev_scan_zap_update_sync,
+	    vd, 2, ZFS_SPACE_CHECK_NONE, tx);
+
+	switch (new_state) {
+	case VDEV_SCAN_ACTIVE:
+		spa_event_notify(spa, vd, NULL,
+		    resumed ? ESC_ZFS_SCAN_RESUME : ESC_ZFS_SCAN_START);
+		spa_history_log_internal(spa, "scan", tx,
+		    "vdev=%s activated", vd->vdev_path);
+		break;
+	case VDEV_SCAN_SUSPENDED:
+		spa_event_notify(spa, vd, NULL, ESC_ZFS_SCAN_SUSPEND);
+		spa_history_log_internal(spa, "scan", tx,
+		    "vdev=%s suspended", vd->vdev_path);
+		break;
+	case VDEV_SCAN_CANCELED:
+		spa_event_notify(spa, vd, NULL, ESC_ZFS_SCAN_CANCEL);
+		spa_history_log_internal(spa, "scan", tx,
+		    "vdev=%s canceled", vd->vdev_path);
+		break;
+	case VDEV_SCAN_COMPLETE:
+		spa_event_notify(spa, vd, NULL, ESC_ZFS_SCAN_FINISH);
+		spa_history_log_internal(spa, "scan", tx,
+		    "vdev=%s complete", vd->vdev_path);
+		break;
+	default:
+		panic("invalid state %llu", (unsigned long long)new_state);
+	}
+
+	dmu_tx_commit(tx);
+
+	if (new_state != VDEV_SCAN_ACTIVE)
+		spa_notify_waiters(spa);
+}
+
+/*
+ * The zio_done_func_t done callback for each scan I/O issued.  It is
+ * responsible for updating the scan I/O stats and limiting the number
+ * of in flight scan I/Os.
+ */
+static void
+vdev_scan_done(zio_t *zio)
+{
+	vdev_t *vd = zio->io_vd;
+
+	mutex_enter(&vd->vdev_scan_io_lock);
+	if (zio->io_error == ENXIO && !vdev_writeable(vd)) {
+		/*
+		 * The I/O failed because the top-level vdev was unavailable.
+		 * Attempt to roll back to the last completed offset, in order
+		 * resume from the correct location if the pool is resumed.
+		 * (This works because spa_sync waits on spa_txg_zio before
+		 * it runs sync tasks.)
+		 */
+		uint64_t *off =
+		    &vd->vdev_scan_offset[zio->io_txg & TXG_MASK];
+		*off = MIN(*off, zio->io_offset);
+	} else if (zio->io_error) {
+		vd->vdev_scan_errors++;
+	}
+
+	abd_free(zio->io_abd);
+	vd->vdev_scan_bytes_done += zio->io_orig_size;
+
+	ASSERT3U(vd->vdev_scan_inflight, >, 0);
+	vd->vdev_scan_inflight--;
+	cv_broadcast(&vd->vdev_scan_io_cv);
+	mutex_exit(&vd->vdev_scan_io_lock);
+
+	spa_config_exit(vd->vdev_spa, SCL_STATE_ALL, vd);
+}
+
+/*
+ * Rebuild the data in this range by constructing a special dummy block
+ * pointer for the given range.  It has no relation to any existing blocks
+ * in the pool.  But by disabling checksum verification and issuing a scrub
+ * I/O, parity can be rebuilt for fixed-width dRAID vdevs.  Mirrored vdevs
+ * will replicate the block using any available mirror leaf vdevs.
+ *
+ * XXX - Discuss mirror rebuilds.  They're potentially more dangerous than
+ * dRAID rebuild because you could read a bad-copy from a mirror-leaf and
+ * overwrite a good mirror leaf.  This is less likely with dRAID since
+ * you're reconstructing from parity.
+ */
+static void
+vdev_scan_rebuild_block(scan_args_t *sa, uint64_t start, uint64_t asize,
+    uint64_t txg)
+{
+	vdev_t *vd = sa->scan_vdev;
+	spa_t *spa = vd->vdev_spa;
+	uint64_t psize = asize;
 
 	ASSERT(vd->vdev_ops == &vdev_draid_ops ||
 	    vd->vdev_ops == &vdev_mirror_ops);
 
 	/* Calculate psize from asize */
-	if (vd->vdev_ops == &vdev_mirror_ops) {
-		psize = asize;
-	} else {
-		int c, faulted;
+	if (vd->vdev_ops == &vdev_draid_ops)
+		psize = vdev_draid_asize2psize(vd, asize, start);
 
-		/*
-		 * Initialize faulted to 1, to count the spare vdev we're
-		 * rebuilding, which is not in faulted state.
-		 */
-		for (c = 0, faulted = 1; c < vd->vdev_children; c++) {
-			vdev_t *child = vd->vdev_child[c];
-
-			if (!vdev_readable(child) ||
-			    (!vdev_writeable(child) && spa_writeable(spa)))
-				faulted++;
-		}
-
-		if (faulted >= vd->vdev_nparity)
-			scan_delay = 0; /* critical, go full speed */
-
-		psize = vdev_draid_asize2psize(vd, asize, offset);
-	}
-	/*
-	 * HH: add this assertion after dmirror implemented
-	 * ASSERT3U(asize, ==, vdev_psize_to_asize(vd, psize, offset));
-	 */
-
+	blkptr_t blk, *bp = &blk;
 	BP_ZERO(bp);
 
-	DVA_SET_VDEV(&dva[0], vd->vdev_id);
-	DVA_SET_OFFSET(&dva[0], offset);
-	DVA_SET_GANG(&dva[0], 0);
-	DVA_SET_ASIZE(&dva[0], asize);
+	DVA_SET_VDEV(&bp->blk_dva[0], vd->vdev_id);
+	DVA_SET_OFFSET(&bp->blk_dva[0], start);
+	DVA_SET_GANG(&bp->blk_dva[0], 0);
+	DVA_SET_ASIZE(&bp->blk_dva[0], asize);
 
 	BP_SET_BIRTH(bp, TXG_INITIAL, TXG_INITIAL);
 	BP_SET_LSIZE(bp, psize);
@@ -125,465 +366,811 @@ spa_vdev_scan_rebuild_block(spa_vdev_scan_t *svs, zio_t *pio,
 	BP_SET_DEDUP(bp, 0);
 	BP_SET_BYTEORDER(bp, ZFS_HOST_BYTEORDER);
 
-	mutex_enter(&svs->svs_io_lock);
-	while (svs->svs_io_asize >=
-	    MIN(arc_max_bytes(), 4 * SPA_MAXBLOCKSIZE * vd->vdev_children))
-		cv_wait(&svs->svs_io_cv, &svs->svs_io_lock);
-	svs->svs_io_asize += asize;
-	mutex_exit(&svs->svs_io_lock);
-
-	if (scan_delay != 0) {
-		/*
-		 * If we're seeing recent (spa_vdev_scan_idle) "important" I/Os
-		 * then throttle our workload to limit the impact of a scan.
-		 */
-		if (ddi_get_lbolt64() - vd->vdev_last_io <= spa_vdev_scan_idle)
-			delay(scan_delay);
-	}
-
-	zio_nowait(zio_read(pio, spa, bp,
-	    abd_alloc(psize, B_FALSE), psize, spa_vdev_scan_done, svs,
-	    ZIO_PRIORITY_SCRUB, ZIO_FLAG_SCAN_THREAD | ZIO_FLAG_RAW |
-	    ZIO_FLAG_CANFAIL | ZIO_FLAG_RESILVER, NULL));
+	zio_nowait(zio_read(spa->spa_txg_zio[txg & TXG_MASK], spa, bp,
+	    abd_alloc(psize, B_FALSE), psize, vdev_scan_done, sa,
+	    ZIO_PRIORITY_SCAN, ZIO_FLAG_RAW | ZIO_FLAG_CANFAIL |
+	    ZIO_FLAG_RESILVER, NULL));
 }
 
-static void
-spa_vdev_scan_rebuild(spa_vdev_scan_t *svs, zio_t *pio,
-    vdev_t *vd, uint64_t offset, uint64_t length)
+/*
+ * Returns the number of currently faulted devices in the top-level vdev.
+ * This includes the spare vdev we're actively rebuilding to, but which is
+ * not in a faulted state.
+ *
+ * XXX - Return the number of vdev guids we're actively rebuilding.  This
+ * may be larger than one if rebuilding multiple, or fewer than the whole
+ * list if some are deffered.
+ */
+static int
+vdev_scan_faults(vdev_t *tvd)
 {
-	uint64_t max_asize;
+	int faulted = 1;
 
-	if (vd->vdev_ops == &vdev_draid_ops)
-		max_asize = vdev_draid_max_rebuildable_asize(vd, offset);
-	else
-		max_asize = vdev_psize_to_asize(vd, offset, SPA_MAXBLOCKSIZE);
+	for (int c = 0; c < tvd->vdev_children; c++) {
+		vdev_t *child = tvd->vdev_child[c];
 
-	while (length > 0 && !svs->svs_thread_exit) {
-		uint64_t chunksz = MIN(length, max_asize);
-
-		spa_vdev_scan_rebuild_block(svs, pio, vd, offset, chunksz);
-
-		length -= chunksz;
-		offset += chunksz;
+		if (!vdev_readable(child) ||
+		    (!vdev_writeable(child) && spa_writeable(tvd->vdev_spa)))
+			faulted++;
 	}
+
+	return (faulted);
 }
 
-static void
-spa_vdev_scan_draid_rebuild(spa_vdev_scan_t *svs, zio_t *pio,
-    vdev_t *vd, vdev_t *oldvd, uint64_t offset, uint64_t length)
+/*
+ * Returns the average scan rate in bytes/sec for the metaslab.  This is
+ * allows for a reasonably accurate current scan rate to be calcualted.
+ * Only issued scan I/O are considered, skipped ranged are ignored.
+ */
+static uint64_t
+vdev_scan_calculate_rate(scan_args_t *sa)
 {
-	uint64_t msi = offset >> vd->vdev_ms_shift;
-	boolean_t mirror;
+	return (sa->scan_bytes_done * 1000 /
+	    (NSEC2MSEC(gethrtime() - sa->scan_start_time) + 1));
+}
 
-	ASSERT3P(vd->vdev_ops, ==, &vdev_draid_ops);
-	ASSERT3U(msi, ==, (offset + length - 1) >> vd->vdev_ms_shift);
+/*
+ * Determine if the range is degraded and needs to be rebuilt given the
+ * list of faulted child vdevs.  When no list can be provided then all
+ * dRAID groups must be rebuilt.
+ */
+static boolean_t
+vdev_scan_draid_group_degraded(scan_args_t *sa, uint64_t start, uint64_t size)
+{
+	ASSERT(sa->scan_vdev->vdev_ops == &vdev_draid_ops);
+	ASSERT3U(sa->scan_faults, <=, 3);
 
-	mirror = vdev_draid_ms_mirrored(vd, msi);
+	if (sa->scan_faults == 0)
+		return (B_TRUE);
 
-	while (length > 0 && !svs->svs_thread_exit) {
-		uint64_t group, group_left, chunksz;
-		char *action;
-
-		/*
-		 * Make sure we don't cross redundancy group boundary
-		 */
-		group = vdev_draid_offset2group(vd, offset, mirror);
-		group_left = vdev_draid_group2offset(vd,
-		    group + 1, mirror) - offset;
-
-		ASSERT(!vdev_draid_is_remainder_group(vd, group, mirror));
-#if 0
-		/* XXX - need to rework interface */
-		ASSERT3U(group_left, <=, vdev_draid_get_groupsz(vd, mirror));
-#endif
-
-		chunksz = MIN(length, group_left);
-		if (vdev_draid_group_degraded(vd, oldvd,
-		    offset, chunksz, mirror)) {
-			action = "Fixing";
-			spa_vdev_scan_rebuild(svs, pio, vd, offset, chunksz);
-		} else {
-			spa_t *spa = vd->vdev_spa;
-			dsl_scan_t *scn = spa->spa_dsl_pool->dp_scan;
-
-			action = "Skipping";
-
-			scn->scn_phys.scn_examined += chunksz;
-			spa->spa_scan_pass_exam += chunksz;
+	for (int i = 0; i < sa->scan_faults; i++) {
+		if (vdev_draid_group_degraded(sa->scan_vdev,
+		    sa->scan_fault_vdevs[i], start, size, B_FALSE)) {
+			return (B_TRUE);
 		}
-
-		if (zfs_flags & ZFS_DEBUG_DRAID) {
-			zfs_dbgmsg("%s: %llu + %llu (%s)",
-			    action, offset, chunksz,
-			    mirror ? "mirrored" : "dRAID");
-		}
-
-		length -= chunksz;
-		offset += chunksz;
 	}
+
+	return (B_FALSE);
 }
 
-static void
-spa_vdev_scan_ms_done(zio_t *zio)
+/*
+ * Issues a scrub I/O and takes care of rate limiting (bytes/sec) and number
+ * of concurrent scrub I/Os.  The provided start and size must by properly
+ * aligned for the top-level vdev type being rebuilt.
+ */
+static int
+vdev_scan_range(scan_args_t *sa, uint64_t start, uint64_t size)
 {
-	metaslab_t *msp = zio->io_private;
-	spa_vdev_scan_t *svs = zio->io_spa->spa_vdev_scan;
-	int *ms_done, msi;
-
-	ASSERT(msp != NULL);
-	ASSERT(svs != NULL);
-
-	mutex_enter(&msp->ms_lock);
-	msp->ms_rebuilding = B_FALSE;
-	mutex_exit(&msp->ms_lock);
-
-	ms_done = svs->svs_ms_done;
-	ASSERT(ms_done != NULL);
-	ASSERT0(ms_done[msp->ms_id]);
-
-	mutex_enter(&svs->svs_lock);
-
-	if (svs->svs_thread_exit) {
-		/*
-		 * Cannot mark this MS as "done", because the rebuild thread
-		 * may have been interrupted in the middle of working on
-		 * this MS.
-		 */
-		mutex_exit(&svs->svs_lock);
-		zfs_dbgmsg("aborted rebuilding metaslab %llu", msp->ms_id);
-		return;
-	}
-
-	ms_done[msp->ms_id] = 1;
-
-	for (msi = svs->svs_msi_synced + 1;
-	    msi < svs->svs_vd->vdev_top->vdev_ms_count; msi++) {
-		if (ms_done[msi] == 0)
-			break;
-	}
-	svs->svs_msi_synced = msi - 1;
-
-	mutex_exit(&svs->svs_lock);
-
-	zfs_dbgmsg("completed rebuilding metaslab %llu", msp->ms_id);
-	zfs_dbgmsg("all metaslabs [0, %d) fully rebuilt", msi);
-}
-
-static void
-spa_vdev_scan_thread(void *arg)
-{
-	vdev_t *vd = arg;
+	uint64_t ms_id __maybe_unused = sa->scan_msp->ms_id;
+	vdev_t *vd = sa->scan_vdev;
 	spa_t *spa = vd->vdev_spa;
-	spa_vdev_scan_t *svs = spa->spa_vdev_scan;
-	zio_t *rio = zio_root(spa, NULL, NULL, 0);
-	range_tree_t *allocd_segs;
-	uint64_t msi;
-	int *ms_done, err;
 
-	ASSERT(svs != NULL);
-	ASSERT3P(svs->svs_vd, ==, vd);
-	ASSERT3P(svs->svs_ms_done, ==, NULL);
+	ASSERT(vd->vdev_ops == &vdev_draid_ops ||
+	    vd->vdev_ops == &vdev_mirror_ops);
+	ASSERT3U(ms_id, ==, start >> vd->vdev_ms_shift);
+	ASSERT3U(ms_id, ==, (start + size - 1) >> vd->vdev_ms_shift);
 
-	vd = vd->vdev_top;
-	ASSERT3U(svs->svs_msi, >=, 0);
-	ASSERT3U(svs->svs_msi, <, vd->vdev_ms_count);
+	/* Mirror dRAID rebuild unsupported */
+	IMPLY(vd->vdev_ops == &vdev_draid_ops,
+	    !vdev_draid_ms_mirrored(vd, ms_id));
 
 	/*
-	 * Wait for newvd's DTL to propagate upward when
-	 * spa_vdev_attach()->spa_vdev_exit() calls vdev_dtl_reassess().
+	 * There's no need to issue a scrub I/O for this range because
+	 * it does not overlap with the degraded dRAID group.
 	 */
-	txg_wait_synced(spa->spa_dsl_pool, svs->svs_dtl_max);
-
-	allocd_segs = range_tree_create(NULL, RANGE_SEG64, NULL, 0, 0);
-
-	ms_done = vmem_alloc(sizeof (*ms_done) * vd->vdev_ms_count, KM_SLEEP);
-	for (msi = 0; msi < vd->vdev_ms_count; msi++) {
-		if (msi < svs->svs_msi)
-			ms_done[msi] = 1;
-		else
-			ms_done[msi] = 0;
+	if (vd->vdev_ops == &vdev_draid_ops &&
+	    !vdev_scan_draid_group_degraded(sa, start, size)) {
+		vd->vdev_scan_bytes_done += size;
+		return (0);
 	}
 
-	mutex_enter(&svs->svs_lock);
-	svs->svs_ms_done = ms_done;
-	svs->svs_msi_synced = svs->svs_msi - 1;
-	mutex_exit(&svs->svs_lock);
+	mutex_enter(&vd->vdev_scan_io_lock);
 
-	for (msi = svs->svs_msi;
-	    msi < vd->vdev_ms_count && !svs->svs_thread_exit; msi++) {
-		metaslab_t *msp = vd->vdev_ms[msi];
-		zio_t *pio = zio_null(rio, spa, NULL,
-		    spa_vdev_scan_ms_done, msp, rio->io_flags);
+	/*
+	 * Limit scan I/Os to the requested rate, when the vd->vdev_scan_rate
+	 * is set to zero no rate limiting is applied.
+	 *
+	 * XXX - Consider optionally rate limiting when there are other more
+	 * critical IOs in the queues.  A helper function could be added to
+	 * vdev_queue.c for this if the normal priority scheme is insufficient.
+	 */
+	while (vd->vdev_scan_rate != 0 && !vdev_scan_should_stop(vd) &&
+	    vdev_scan_calculate_rate(sa) > vd->vdev_scan_rate) {
 
-		ASSERT0(range_tree_space(allocd_segs));
+		/* Disable rate limiting when no redundancy remains. */
+		if (vdev_scan_faults(vd) >= vd->vdev_nparity)
+			break;
 
-		mutex_enter(&msp->ms_sync_lock);
-		mutex_enter(&msp->ms_lock);
-
-		while (msp->ms_condensing) {
-			mutex_exit(&msp->ms_lock);
-
-			zfs_sleep_until(gethrtime() + 100 * MICROSEC);
-
-			mutex_enter(&msp->ms_lock);
-		}
-
-		VERIFY(!msp->ms_condensing);
-		VERIFY(!msp->ms_rebuilding);
-		msp->ms_rebuilding = B_TRUE;
-
-		/*
-		 * If the metaslab has ever been allocated from (ms_sm!=NULL),
-		 * read the allocated segments from the space map object
-		 * into svr_allocd_segs. Since we do this while holding
-		 * svr_lock and ms_sync_lock, concurrent frees (which
-		 * would have modified the space map) will wait for us
-		 * to finish loading the spacemap, and then take the
-		 * appropriate action (see free_from_removing_vdev()).
-		 */
-		if (msp->ms_sm != NULL) {
-			space_map_t *sm = NULL;
-
-			/*
-			 * We have to open a new space map here, because
-			 * ms_sm's sm_length and sm_alloc may not reflect
-			 * what's in the object contents, if we are in between
-			 * metaslab_sync() and metaslab_sync_done().
-			 */
-			VERIFY0(space_map_open(&sm,
-			    spa->spa_dsl_pool->dp_meta_objset,
-			    msp->ms_sm->sm_object, msp->ms_sm->sm_start,
-			    msp->ms_sm->sm_size, msp->ms_sm->sm_shift));
-			VERIFY0(space_map_load(sm, allocd_segs, SM_ALLOC));
-			space_map_close(sm);
-		}
-		mutex_exit(&msp->ms_lock);
-		mutex_exit(&msp->ms_sync_lock);
-
-		zfs_dbgmsg("scanning %llu segments for MS %llu",
-		    range_tree_numsegs(allocd_segs), msp->ms_id);
-
-		while (!svs->svs_thread_exit &&
-		    !range_tree_is_empty(allocd_segs)) {
-			range_seg_t *rs = range_tree_first(allocd_segs);
-
-			ASSERT(rs != NULL);
-			uint64_t offset = rs_get_start(rs, allocd_segs);
-			uint64_t length = rs_get_end(rs, allocd_segs) - offset;
-
-			range_tree_remove(allocd_segs, offset, length);
-
-			zfs_dbgmsg("MS (%llu at %llu) segment: %llu + %llu",
-			    msp->ms_id, msp->ms_start,
-			    offset - msp->ms_start, length);
-
-			if (vd->vdev_ops == &vdev_mirror_ops)
-				spa_vdev_scan_rebuild(svs, pio,
-				    vd, offset, length);
-			else
-				spa_vdev_scan_draid_rebuild(svs, pio, vd,
-				    svs->svs_vd, offset, length);
-		}
-
-		zio_nowait(pio);
+		cv_timedwait_sig(&vd->vdev_scan_io_cv,
+		    &vd->vdev_scan_io_lock, ddi_get_lbolt() + MSEC_TO_TICK(10));
 	}
 
-	err = zio_wait(rio);
-	if (err != 0) /* HH: handle error */
-		err = SET_ERROR(err);
+	sa->scan_bytes_done += size;
 
-	mutex_enter(&svs->svs_lock);
-	if (svs->svs_thread_exit) {
-		range_tree_vacate(allocd_segs, NULL, NULL);
+	/* Limit in flight scrubbing I/Os */
+	while (vd->vdev_scan_inflight >= zfs_scan_queue_limit)
+		cv_wait(&vd->vdev_scan_io_cv, &vd->vdev_scan_io_lock);
+
+	vd->vdev_scan_inflight++;
+	mutex_exit(&vd->vdev_scan_io_lock);
+
+	dmu_tx_t *tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
+	VERIFY0(dmu_tx_assign(tx, TXG_WAIT));
+	uint64_t txg = dmu_tx_get_txg(tx);
+
+	spa_config_enter(spa, SCL_STATE_ALL, vd, RW_READER);
+	mutex_enter(&vd->vdev_scan_lock);
+
+	/* This is the first I/O for this txg. */
+	if (vd->vdev_scan_offset[txg & TXG_MASK] == 0) {
+		vd->vdev_scan_rate_avg = vdev_scan_calculate_rate(sa);
+		dsl_sync_task_nowait(spa_get_dsl(spa),
+		    vdev_scan_zap_update_sync, vd, 2,
+		    ZFS_SPACE_CHECK_RESERVED, tx);
 	}
 
-	svs->svs_thread = NULL;
-	svs->svs_ms_done = NULL;
-	cv_broadcast(&svs->svs_cv);
-	mutex_exit(&svs->svs_lock);
+	/* When exiting write out our progress. */
+	if (vdev_scan_should_stop(vd)) {
+		mutex_enter(&vd->vdev_scan_io_lock);
+		vd->vdev_scan_inflight--;
+		mutex_exit(&vd->vdev_scan_io_lock);
+		spa_config_exit(vd->vdev_spa, SCL_STATE_ALL, vd);
+		mutex_exit(&vd->vdev_scan_lock);
+		dmu_tx_commit(tx);
+		return (SET_ERROR(EINTR));
+	}
+	mutex_exit(&vd->vdev_scan_lock);
 
-	ASSERT0(range_tree_space(allocd_segs));
-	range_tree_destroy(allocd_segs);
-	vmem_free(ms_done, sizeof (*ms_done) * vd->vdev_ms_count);
-	thread_exit();
-}
+	vd->vdev_scan_offset[txg & TXG_MASK] = start + size;
+	vdev_scan_rebuild_block(sa, start, size, txg);
 
-void
-spa_vdev_scan_start(spa_t *spa, vdev_t *oldvd, int msi, uint64_t txg)
-{
-	dsl_scan_t *scan = spa->spa_dsl_pool->dp_scan;
-	spa_vdev_scan_t *svs = kmem_zalloc(sizeof (*svs), KM_SLEEP);
+	dmu_tx_commit(tx);
 
-	ASSERT3U(msi, <, oldvd->vdev_top->vdev_ms_count);
-
-	svs->svs_msi = msi;
-	svs->svs_vd = oldvd;
-	svs->svs_dtl_max = txg;
-	svs->svs_thread = NULL;
-	svs->svs_ms_done = NULL;
-	svs->svs_dp = spa->spa_dsl_pool;
-	mutex_init(&svs->svs_lock, NULL, MUTEX_DEFAULT, NULL);
-	cv_init(&svs->svs_cv, NULL, CV_DEFAULT, NULL);
-	svs->svs_io_asize = 0;
-	mutex_init(&svs->svs_io_lock, NULL, MUTEX_DEFAULT, NULL);
-	cv_init(&svs->svs_io_cv, NULL, CV_DEFAULT, NULL);
-	ASSERT3P(spa->spa_vdev_scan, ==, NULL);
-	spa->spa_vdev_scan = svs;
-	svs->svs_thread = thread_create(NULL, 0, spa_vdev_scan_thread, oldvd,
-	    0, NULL, TS_RUN, defclsyspri);
-
-	scan->scn_restart_txg = txg;
-}
-
-int
-spa_vdev_scan_restart(vdev_t *rvd)
-{
-	spa_t *spa = rvd->vdev_spa;
-	dsl_scan_t *scn = spa->spa_dsl_pool->dp_scan;
-	spa_rebuilding_phys_t svs_phys;
-	int err;
-	vdev_t *tvd, *oldvd, *pvd, *dspare;
-
-	ASSERT(scn != NULL);
-	ASSERT3P(spa->spa_vdev_scan, ==, NULL);
-
-	err = zap_lookup(spa->spa_dsl_pool->dp_meta_objset,
-	    DMU_POOL_DIRECTORY_OBJECT, DMU_POOL_REBUILDING, sizeof (uint64_t),
-	    sizeof (spa_rebuilding_phys_t) / sizeof (uint64_t), &svs_phys);
-
-	if (err != 0 || !DSL_SCAN_IS_REBUILD(scn) ||
-	    scn->scn_phys.scn_state == DSS_FINISHED ||
-	    svs_phys.sr_vdev == 0 || svs_phys.sr_oldvd == 0 ||
-	    svs_phys.sr_ms < -1)
-		return (SET_ERROR(ENOENT));
-
-	tvd = vdev_lookup_by_guid(rvd, svs_phys.sr_vdev);
-	oldvd = vdev_lookup_by_guid(rvd, svs_phys.sr_oldvd);
-	if (tvd == NULL || oldvd == NULL || oldvd->vdev_top != tvd)
-		return (SET_ERROR(ENOENT));
-
-	if (tvd->vdev_ops != &vdev_draid_ops)
-		return (SET_ERROR(ENOTSUP));
-
-	if (svs_phys.sr_ms >= tvd->vdev_ms_count - 1)
-		return (SET_ERROR(ENOENT));
-
-	pvd = oldvd->vdev_parent;
-	if (pvd->vdev_ops != &vdev_spare_ops || pvd->vdev_children != 2)
-		return (SET_ERROR(ENOENT));
-
-	dspare = pvd->vdev_child[1];
-	if (dspare->vdev_ops != &vdev_draid_spare_ops ||
-	    !vdev_resilver_needed(dspare, NULL, NULL))
-		return (SET_ERROR(ENOENT));
-
-	zfs_dbgmsg("restarting rebuild at metaslab %llu", svs_phys.sr_ms + 1);
-	spa_vdev_scan_start(spa, oldvd, svs_phys.sr_ms + 1,
-	    spa_last_synced_txg(spa) + 1 + TXG_CONCURRENT_STATES);
 	return (0);
 }
 
-void
-spa_vdev_scan_setup_sync(dmu_tx_t *tx)
+/*
+ * Issues scrub I/Os for all ranges in the provided sa->scan_tree range tree.
+ * Additional parameters describing how the I/Os should be performed are
+ * set in the scan_args structure.  See the scan_args definition for
+ * additional information.
+ */
+static int
+vdev_scan_ranges(scan_args_t *sa)
 {
-	dsl_scan_t *scn = dmu_tx_pool(tx)->dp_scan;
-	spa_t *spa = scn->scn_dp->dp_spa;
-	spa_vdev_scan_t *svs = spa->spa_vdev_scan;
-	vdev_t *oldvd;
+	vdev_t *vd = sa->scan_vdev;
+	zfs_btree_t *t = &sa->scan_tree->rt_root;
+	zfs_btree_index_t idx;
+	uint64_t extent_bytes_max = sa->scan_extent_bytes_max;
+	spa_t *spa = vd->vdev_spa;
 
-	ASSERT(scn->scn_phys.scn_state != DSS_SCANNING);
-	ASSERT(svs != NULL);
+	sa->scan_start_time = gethrtime();
+	sa->scan_bytes_done = 0;
 
-	oldvd = svs->svs_vd;
-	bzero(&scn->scn_phys, sizeof (scn->scn_phys));
-	scn->scn_phys.scn_func = POOL_SCAN_REBUILD;
-	scn->scn_phys.scn_state = DSS_SCANNING;
-	scn->scn_phys.scn_min_txg = 0;
-	scn->scn_phys.scn_max_txg = tx->tx_txg;
-	scn->scn_phys.scn_ddt_class_max = 0;
-	scn->scn_phys.scn_start_time = gethrestime_sec();
-	scn->scn_phys.scn_errors = 0;
-	/* Rebuild only examines blocks on one vdev */
-	scn->scn_phys.scn_to_examine = oldvd->vdev_top->vdev_stat.vs_alloc;
-	svs->svs_phys.sr_ms = -1;
-	svs->svs_phys.sr_vdev = oldvd->vdev_top->vdev_guid;
-	svs->svs_phys.sr_oldvd = oldvd->vdev_guid;
+	for (range_seg_t *rs = zfs_btree_first(t, &idx); rs != NULL;
+	    rs = zfs_btree_next(t, &idx, &idx)) {
+		uint64_t start = rs_get_start(rs, sa->scan_tree);
+		uint64_t size = rs_get_end(rs, sa->scan_tree) - start;
 
-	scn->scn_restart_txg = 0;
-	scn->scn_done_txg = 0;
-	scn->scn_sync_start_time = gethrtime();
+		/* Skip the known completed range of the metaslab. */
+		if (start + size <= vd->vdev_scan_last_offset)
+			continue;
 
-	spa->spa_scrub_active = B_TRUE;
-	spa_scan_stat_init(spa);
-	spa->spa_scrub_started = B_TRUE;
-	spa_event_notify(spa, NULL, NULL, ESC_ZFS_REBUILD_START);
+		/*
+		 * Split range into legally-sized logical chunk given the
+		 * constraints of the top-level vdev type.  Block may not:
+		 *
+		 *   1) Exceed the pool's maximum allowed block size.
+		 *   2) Exceed the zfs_scan_extent_bytes_max limit.
+		 *   3) Span dRAID redundancy groups or metaslabs.
+		 */
+		while (size > 0) {
+			uint64_t chunk_size;
+			if (vd->vdev_ops == &vdev_draid_ops) {
+				uint64_t group = vdev_draid_offset2group(vd,
+				    start, B_FALSE);
+				chunk_size = vdev_draid_max_rebuildable_asize(
+				    vd, start);
+				chunk_size = MIN(chunk_size,
+				    vdev_draid_group2offset(vd,
+				    group + 1, B_FALSE) - start);
+			} else {
+				chunk_size = vdev_psize_to_asize(vd,
+				    start, SPA_MAXBLOCKSIZE);
+			}
+
+			chunk_size = MIN(size, spa_maxblocksize(spa));
+			chunk_size = MIN(chunk_size, extent_bytes_max);
+
+			int error = vdev_scan_range(sa, start, chunk_size);
+			if (error != 0)
+				return (error);
+
+			size -= chunk_size;
+			start += chunk_size;
+		}
+	}
+
+	return (0);
+}
+
+static void
+vdev_scan_calculate_progress(vdev_t *vd)
+{
+	ASSERT(spa_config_held(vd->vdev_spa, SCL_CONFIG, RW_READER) ||
+	    spa_config_held(vd->vdev_spa, SCL_CONFIG, RW_WRITER));
+	ASSERT(vd->vdev_top == vd);
+
+	vd->vdev_scan_bytes_est = 0;
+	vd->vdev_scan_bytes_done = 0;
+
+	for (uint64_t i = 0; i < vd->vdev_ms_count; i++) {
+		metaslab_t *msp = vd->vdev_ms[i];
+		uint64_t last = vd->vdev_scan_last_offset;
+		uint64_t alloc, ms_id;
+
+		mutex_enter(&msp->ms_lock);
+
+		alloc = metaslab_allocated_space(msp);
+		if (alloc == 0) {
+			mutex_exit(&msp->ms_lock);
+			continue;
+		}
+
+		vd->vdev_scan_bytes_est += alloc;
+		ms_id = last >> vd->vdev_ms_shift;
+
+		if (msp->ms_id < ms_id) {
+			vd->vdev_scan_bytes_done += alloc;
+		} else if (msp->ms_id == ms_id) {
+			range_tree_t *rt;
+			zfs_btree_t *bt;
+			zfs_btree_index_t idx;
+
+			/*
+			 * If we get here, we're in the middle of scaning this
+			 * metaslab.  Load it and walk the allocated space map
+			 * for an accurate progress estimation.
+			 */
+			rt = range_tree_create(NULL, RANGE_SEG64, NULL, 0, 0);
+			bt = &rt->rt_root;
+
+			VERIFY0(metaslab_load(msp));
+			VERIFY0(space_map_load(msp->ms_sm, rt, SM_ALLOC));
+
+			for (range_seg_t *rs = zfs_btree_first(bt, &idx);
+			    rs != NULL; rs = zfs_btree_next(bt, &idx, &idx)) {
+				uint64_t rs_start = rs_get_start(rs, rt);
+				uint64_t rs_end = rs_get_end(rs, rt);
+				uint64_t rs_size = rs_end - rs_start;
+
+				if (rs_end <= last) {
+					vd->vdev_scan_bytes_done += rs_size;
+				} else if (rs_end > last && rs_start < last) {
+					vd->vdev_scan_bytes_done +=
+					    last - rs_start;
+				} else {
+					break;
+				}
+			}
+
+			range_tree_vacate(rt, NULL, NULL);
+		}
+
+		mutex_exit(&msp->ms_lock);
+	}
+}
+
+/*
+ * Load from disk the top-level vdev's scan information.  This includes the
+ * state, progress, and options provided when initiating the scan.
+ */
+static int
+vdev_scan_load(vdev_t *vd)
+{
+	spa_t *spa = vd->vdev_spa;
+	int err = 0;
+
+	ASSERT(spa_config_held(spa, SCL_CONFIG, RW_READER) ||
+	    spa_config_held(spa, SCL_CONFIG, RW_WRITER));
+	ASSERT(vd->vdev_top == vd);
+
+	if (vd->vdev_scan_state == VDEV_SCAN_ACTIVE ||
+	    vd->vdev_scan_state == VDEV_SCAN_SUSPENDED) {
+		objset_t *mos = spa->spa_meta_objset;
+
+		err = zap_lookup(mos, vd->vdev_top_zap,
+		    VDEV_TOP_ZAP_SCAN_LAST_OFFSET, sizeof (uint64_t), 1,
+		    &vd->vdev_scan_last_offset);
+		if (err == ENOENT) {
+			vd->vdev_scan_last_offset = 0;
+			err = 0;
+		}
+
+		if (err == 0) {
+			err = zap_lookup(mos, vd->vdev_top_zap,
+			    VDEV_TOP_ZAP_SCAN_RATE, sizeof (uint64_t), 1,
+			    &vd->vdev_scan_rate);
+			if (err == ENOENT) {
+				vd->vdev_scan_rate = 0;
+				err = 0;
+			}
+		}
+
+		if (err == 0) {
+			err = zap_lookup(mos, vd->vdev_top_zap,
+			    VDEV_TOP_ZAP_SCAN_START_TIME, sizeof (uint64_t), 1,
+			    &vd->vdev_scan_start_time);
+			if (err == ENOENT) {
+				vd->vdev_scan_start_time = gethrestime_sec();
+				err = 0;
+			}
+		}
+
+		if (err == 0) {
+			err = zap_lookup(mos, vd->vdev_top_zap,
+			    VDEV_TOP_ZAP_SCAN_END_TIME, sizeof (uint64_t), 1,
+			    &vd->vdev_scan_end_time);
+			if (err == ENOENT) {
+				vd->vdev_scan_end_time = 0;
+				err = 0;
+			}
+		}
+
+		if (err == 0) {
+			err = zap_lookup(mos, vd->vdev_top_zap,
+			    VDEV_TOP_ZAP_SCAN_FAULT_GUIDS,
+			    sizeof (uint64_t), 3, vd->vdev_scan_fault_guids);
+			if (err == ENOENT) {
+				vdev_scan_set_fault_guid(vd, 0, -1);
+				err = 0;
+			}
+		}
+
+		if (err == 0) {
+			err = zap_lookup(mos, vd->vdev_top_zap,
+			    VDEV_TOP_ZAP_SCAN_DEFER_GUIDS,
+			    sizeof (uint64_t), 3, vd->vdev_scan_defer_guids);
+			if (err == ENOENT) {
+				vdev_scan_set_defer_guid(vd, 0, -1);
+				err = 0;
+			}
+		}
+	}
+
+	vdev_scan_calculate_progress(vd);
+
+	return (err);
+}
+
+/*
+ * Each scan thread is responsible for rebuilding a top-level vdev.  The
+ * rebuild progress in tracked on disk using the VDEV_TOP_ZAP_SCAN_* entries.
+ */
+static void
+vdev_scan_thread(void *arg)
+{
+	vdev_t *vd = arg;
+	spa_t *spa = vd->vdev_spa;
+	scan_args_t sa;
+	int error = 0;
+
+	/*
+	 * The VDEV_TOP_ZAP_SCAN_* entries may have been updated.  Wait for
+	 * the updated values, and for the new vdevs's DTL to propagate when
+	 * spa_vdev_attach()->spa_vdev_exit() calls vdev_dtl_reassess().
+	 */
+	txg_wait_synced(spa_get_dsl(vd->vdev_spa), 0);
+
+	mutex_enter(&vd->vdev_scan_lock);
+	ASSERT3P(vd->vdev_top, ==, vd);
+	ASSERT3P(vd->vdev_scan_thread, !=, NULL);
+	mutex_exit(&vd->vdev_scan_lock);
+
+	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+
+	vd->vdev_scan_last_offset = 0;
+	vd->vdev_scan_action_time = 0;
+	vd->vdev_scan_rate = 0;
+	bzero(vd->vdev_scan_fault_guids, sizeof (uint64_t) * 3);
+	bzero(vd->vdev_scan_defer_guids, sizeof (uint64_t) * 3);
+
+	VERIFY0(vdev_scan_load(vd));
+
+	sa.scan_vdev = vd;
+	sa.scan_msp = NULL;
+	sa.scan_tree = range_tree_create(NULL, RANGE_SEG64, NULL, 0, 0);
+	sa.scan_extent_bytes_max = zfs_scan_extent_bytes_max;
+	sa.scan_faults = 0;
+
+	/*
+	 * Lookup the faulted vdev guids so a dRAID rebuild can skip offsets
+	 * which are not degraded due to the fault.  If any of the guids
+	 * cannot be located then all ranges in the dRAID must be rebuilt.
+	 * Indicate this unexpected issue by setting sa.scan_faults = 0
+	 * and clearing the invalid vd->vdev_scan_fault_guids.
+	 */
+	for (int i = 0; i < 3; i++) {
+		uint64_t guid = vd->vdev_scan_fault_guids[i];
+		vdev_t *fvd;
+
+		if (guid != 0) {
+			fvd = vdev_lookup_by_guid(vd, guid);
+			if (fvd != NULL) {
+				sa.scan_faults++;
+				sa.scan_fault_vdevs[i] = fvd;
+			} else {
+				bzero(vd->vdev_scan_fault_guids,
+				    sizeof (uint64_t) * 3);
+				sa.scan_faults = 0;
+				break;
+			}
+		} else {
+			break;
+		}
+	}
+
+	uint64_t ms_count = 0;
+	for (uint64_t i = 0; i < vd->vdev_ms_count; i++) {
+		metaslab_t *msp = vd->vdev_ms[i];
+
+		/*
+		 * Skip metaslabs which have already been rebuilt based on the
+		 * last offset.  This will happen when restarting a scan after
+		 * exporting and re-importing the pool.  vdev_scan_ranges() is
+		 * responsible for skipping the rebuilt range of individual
+		 * metaslabs.
+		 */
+		if (vd->vdev_scan_last_offset <= msp->ms_start + msp->ms_size)
+			continue;
+
+		/*
+		 * If we've expanded the top-level vdev or it's our
+		 * first pass, calculate our progress.
+		 */
+		if (vd->vdev_ms_count != ms_count) {
+			vdev_scan_calculate_progress(vd);
+			ms_count = vd->vdev_ms_count;
+		}
+
+		spa_config_exit(spa, SCL_CONFIG, FTAG);
+		metaslab_disable(msp);
+		mutex_enter(&msp->ms_lock);
+		VERIFY0(metaslab_load(msp));
+
+		/*
+		 * Skip metaslabs which have never been allocated from
+		 * and therefore do not contain a space map.
+		 */
+		if (msp->ms_sm == NULL) {
+			mutex_exit(&msp->ms_lock);
+			metaslab_enable(msp, B_FALSE, B_FALSE);
+			spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+			vdev_scan_calculate_progress(vd);
+			continue;
+		}
+
+		ASSERT0(range_tree_space(sa.scan_tree));
+
+		sa.scan_msp = msp;
+		VERIFY0(space_map_load(msp->ms_sm, sa.scan_tree, SM_ALLOC));
+		mutex_exit(&msp->ms_lock);
+
+		error = vdev_scan_ranges(&sa);
+		metaslab_enable(msp, B_TRUE, B_FALSE);
+		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+
+		range_tree_vacate(sa.scan_tree, NULL, NULL);
+
+		if (error != 0)
+			break;
+	}
+
+	spa_config_exit(spa, SCL_CONFIG, FTAG);
+	mutex_enter(&vd->vdev_scan_io_lock);
+	while (vd->vdev_scan_inflight > 0)
+		cv_wait(&vd->vdev_scan_io_cv, &vd->vdev_scan_io_lock);
+
+	mutex_exit(&vd->vdev_scan_io_lock);
+
+	range_tree_destroy(sa.scan_tree);
+
+	mutex_enter(&vd->vdev_scan_lock);
+	if (!vd->vdev_scan_exit_wanted && vdev_writeable(vd)) {
+		vdev_scan_change_state(vd, VDEV_SCAN_COMPLETE,
+		    vd->vdev_scan_rate, NULL, B_FALSE);
+		zfs_dbgmsg("All %d metaslabs rebuilt %llu / %llu bytes",
+		    vd->vdev_ms_count, (u_longlong_t)vd->vdev_scan_bytes_done,
+		    (u_longlong_t)vd->vdev_scan_bytes_est);
+	}
+
+	/*
+	 * Drop the vdev_scan_lock while we sync out the txg since it's
+	 * possible that a device might be trying to come online and must
+	 * check to see if it needs to restart a scan. That thread will be
+	 * holding the spa_config_lock which would prevent the txg_wait_synced
+	 * from completing.
+	 */
+	mutex_exit(&vd->vdev_scan_lock);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	mutex_enter(&vd->vdev_scan_lock);
+
+	vd->vdev_scan_thread = NULL;
+	cv_broadcast(&vd->vdev_scan_cv);
+	mutex_exit(&vd->vdev_scan_lock);
+}
+
+/*
+ * Starts a scan thread, as needed, for each top-level vdev which is in
+ * the active state but no scan thread has yet been created.
+ */
+static void
+vdev_scan_start(vdev_t *vd, boolean_t reset)
+{
+	spa_t *spa = vd->vdev_spa;
+
+	if (vd == spa->spa_root_vdev) {
+		for (uint64_t i = 0; i < vd->vdev_children; i++)
+			vdev_scan_start(vd->vdev_child[i], reset);
+
+	} else if (vd->vdev_top_zap != 0) {
+		ASSERT(vd == vd->vdev_top);
+
+		mutex_enter(&vd->vdev_scan_lock);
+		if (vdev_writeable(vd) && !vd->vdev_removing &&
+		    vd->vdev_scan_thread == NULL) {
+			vd->vdev_scan_reset_wanted = reset;
+			vd->vdev_scan_thread = thread_create(NULL, 0,
+			    vdev_scan_thread, vd, 0, &p0, TS_RUN,
+			    maxclsyspri);
+			ASSERT(vd->vdev_scan_thread != NULL);
+		}
+		mutex_exit(&vd->vdev_scan_lock);
+	}
+}
+
+/*
+ * Returns B_TRUE if any top-level vdev is actively being rebuilt.
+ */
+boolean_t
+vdev_scan_rebuilding(vdev_t *vd)
+{
+	spa_t *spa = vd->vdev_spa;
+	boolean_t ret = B_FALSE;
+
+	if (vd == spa->spa_root_vdev) {
+		for (uint64_t i = 0; i < vd->vdev_children; i++) {
+			ret = vdev_scan_rebuilding(vd->vdev_child[i]);
+			if (ret)
+				return (ret);
+		}
+	} else if (vd->vdev_top_zap != 0) {
+		mutex_enter(&vd->vdev_scan_lock);
+		ret = (vd->vdev_scan_thread != NULL);
+		mutex_exit(&vd->vdev_scan_lock);
+	}
+
+	return (ret);
+}
+
+/*
+ * Returns B_TRUE if any top-level vdev is suspended.
+ */
+boolean_t
+vdev_scan_suspended(vdev_t *vd)
+{
+	spa_t *spa = vd->vdev_spa;
+	boolean_t ret = B_FALSE;
+
+	if (vd == spa->spa_root_vdev) {
+		for (uint64_t i = 0; i < vd->vdev_children; i++) {
+			ret = vdev_scan_suspended(vd->vdev_child[i]);
+			if (ret)
+				return (ret);
+		}
+	} else if (vd->vdev_top_zap != 0) {
+		mutex_enter(&vd->vdev_scan_lock);
+		ret = (vd->vdev_scan_state == VDEV_SCAN_SUSPENDED);
+		mutex_exit(&vd->vdev_scan_lock);
+	}
+
+	return (ret);
+}
+
+/*
+ * Enqueue or start a rebuild operation.  The rebuild may be deferred if
+ * the top-level vdev is currently actively rebuilding.  When the fault_vdev
+ * is NULL it indicates a restart, rate change, or both were requested.
+ */
+void
+vdev_scan_rebuild(vdev_t *tvd, vdev_t *fault_vdev, boolean_t reset)
+{
+	boolean_t start = B_FALSE;
+
+	mutex_enter(&tvd->vdev_scan_lock);
+	if (vdev_scan_rebuilding(tvd)) {
+		if (reset) {
+			/*
+			 * Top-level vdev is actively rebuilding and deferring
+			 * the new rebuild is NOT preferred.  In this case,
+			 * the active rebuild must be cancelled, the new
+			 * faulted guid added, and the rebuild operation
+			 * reset and started from the beginning.
+			 */
+			mutex_exit(&tvd->vdev_scan_lock);
+			vdev_scan_stop_wait(tvd, VDEV_SCAN_CANCELED);
+			mutex_enter(&tvd->vdev_scan_lock);
+			vdev_scan_change_state(tvd, VDEV_SCAN_ACTIVE,
+			    tvd->vdev_scan_rate, fault_vdev, B_FALSE);
+			start = B_TRUE;
+		} else {
+			/*
+			 * Top-level vdev is actively rebuilding and deferring
+			 * the new rebuild is preferred.  Add it to the list
+			 * of deferred guids and allow the running rebuild
+			 * to continue.  A new rebuild will be automatically
+			 * started when the active rebuild completes.
+			 */
+			vdev_scan_change_state(tvd, VDEV_SCAN_ACTIVE,
+			    tvd->vdev_scan_rate, fault_vdev, B_TRUE);
+		}
+	} else {
+		/*
+		 * No rebuild is active for the top-level vdev.  Add the
+		 * faulted vdev guid and start the rebuild operation.
+		 */
+		vdev_scan_change_state(tvd, VDEV_SCAN_ACTIVE,
+		    tvd->vdev_scan_rate, fault_vdev, B_FALSE);
+		start = B_TRUE;
+	}
+	mutex_exit(&tvd->vdev_scan_lock);
+
+	if (start)
+		vdev_scan_start(tvd, reset);
+}
+
+/*
+ * Sets the requested maximum rebuild rate.
+ */
+void
+vdev_scan_set_rate(vdev_t *vd, uint64_t rate)
+{
+	spa_t *spa = vd->vdev_spa;
+
+	if (vd == spa->spa_root_vdev) {
+		for (uint64_t i = 0; i < vd->vdev_children; i++)
+			vdev_scan_set_rate(vd->vdev_child[i], rate);
+
+	} else if (vd->vdev_top_zap != 0) {
+		mutex_enter(&vd->vdev_scan_lock);
+		if (vd->vdev_scan_state == VDEV_SCAN_ACTIVE ||
+		    vd->vdev_scan_state == VDEV_SCAN_SUSPENDED) {
+			vdev_scan_change_state(vd, vd->vdev_scan_state,
+			    rate, NULL, B_FALSE);
+			vd->vdev_scan_rate = rate;
+		}
+		mutex_exit(&vd->vdev_scan_lock);
+	}
+}
+
+/*
+ * Conditionally restart all of the vdev_scan_thread's when provided
+ * the root of the vdev tree, or individual top-level vdevs.
+ */
+void
+vdev_scan_restart(vdev_t *vd, boolean_t reset)
+{
+	spa_t *spa = vd->vdev_spa;
+
+	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(!spa_config_held(vd->vdev_spa, SCL_ALL, RW_WRITER));
+
+	if (vd == spa->spa_root_vdev) {
+		for (uint64_t i = 0; i < vd->vdev_children; i++)
+			vdev_scan_restart(vd->vdev_child[i], reset);
+
+	} else if (vd->vdev_top_zap != 0) {
+		ASSERT(vd == vd->vdev_top);
+
+		mutex_enter(&vd->vdev_scan_lock);
+		uint64_t scan_state = VDEV_SCAN_NONE;
+		int err = zap_lookup(spa->spa_meta_objset,
+		    vd->vdev_top_zap, VDEV_TOP_ZAP_SCAN_STATE,
+		    sizeof (scan_state), 1, &scan_state);
+		ASSERT(err == 0 || err == ENOENT);
+		vd->vdev_scan_state = scan_state;
+
+		uint64_t timestamp = 0;
+		err = zap_lookup(spa->spa_meta_objset,
+		    vd->vdev_top_zap, VDEV_TOP_ZAP_SCAN_ACTION_TIME,
+		    sizeof (timestamp), 1, &timestamp);
+		ASSERT(err == 0 || err == ENOENT);
+		vd->vdev_scan_action_time = timestamp;
+
+		if (vd->vdev_scan_state == VDEV_SCAN_SUSPENDED) {
+			/* load progress for reporting, but don't resume */
+			VERIFY0(vdev_scan_load(vd));
+		} else if (vd->vdev_scan_state == VDEV_SCAN_ACTIVE &&
+		    vdev_writeable(vd) && !vd->vdev_removing &&
+		    vd->vdev_scan_thread == NULL) {
+			VERIFY0(vdev_scan_load(vd));
+			vdev_scan_start(vd, reset);
+		}
+
+		mutex_exit(&vd->vdev_scan_lock);
+	}
+}
+
+/*
+ * Stop and wait for all of the vdev_scan_thread's associated with the
+ * vdev tree provide to be terminated (canceled or stopped).
+ */
+void
+vdev_scan_stop_wait(vdev_t *vd, vdev_scan_state_t tgt_state)
+{
+	spa_t *spa = vd->vdev_spa;
+
+	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+
+	if (vd == spa->spa_root_vdev) {
+		for (uint64_t i = 0; i < vd->vdev_children; i++)
+			vdev_scan_stop_wait(vd->vdev_child[i], tgt_state);
+
+	} else if (vd->vdev_top_zap != 0) {
+		ASSERT(vd == vd->vdev_top);
+
+		mutex_enter(&vd->vdev_scan_lock);
+		if (vd->vdev_scan_thread != NULL) {
+			vdev_scan_change_state(vd, tgt_state, 0, NULL, B_FALSE);
+			vd->vdev_scan_exit_wanted = B_TRUE;
+
+			while (vd->vdev_scan_thread != NULL)
+				cv_wait(&vd->vdev_scan_cv, &vd->vdev_scan_lock);
+
+			ASSERT3P(vd->vdev_scan_thread, ==, NULL);
+			vd->vdev_scan_exit_wanted = B_FALSE;
+		}
+		mutex_exit(&vd->vdev_scan_lock);
+	}
 }
 
 int
-spa_vdev_scan_rebuild_cb(dsl_pool_t *dp,
-    const blkptr_t *bp, const zbookmark_phys_t *zb)
+vdev_scan_get_stats(vdev_t *tvd, vdev_rebuild_stat_t *vrs)
 {
-	/* Rebuild happens in open context and does not use this callback */
-	ASSERT0(1);
-	return (-ENOTSUP);
+	if (!spa_feature_is_active(tvd->vdev_spa, SPA_FEATURE_DEVICE_REBUILD))
+		return (SET_ERROR(ENOTSUP));
+
+	if (tvd != tvd->vdev_top || tvd->vdev_top_zap == 0)
+		return (SET_ERROR(EINVAL));
+
+	int error = zap_contains(spa_meta_objset(tvd->vdev_spa),
+	    tvd->vdev_top_zap, VDEV_TOP_ZAP_SCAN_STATE);
+	ASSERT(error == 0 || error == ENOENT);
+
+	if (error == ENOENT) {
+		bzero(vrs, sizeof (vdev_rebuild_stat_t));
+		vrs->vrs_state = VDEV_SCAN_NONE;
+	} else {
+		mutex_enter(&tvd->vdev_scan_lock);
+		vrs->vrs_state = tvd->vdev_scan_state;
+		vrs->vrs_start_time = tvd->vdev_scan_start_time;
+		vrs->vrs_end_time = tvd->vdev_scan_end_time;
+		vrs->vrs_action_time = tvd->vdev_scan_action_time;
+		vrs->vrs_bytes_done = tvd->vdev_scan_bytes_done;
+		vrs->vrs_bytes_est = tvd->vdev_scan_bytes_est;
+		vrs->vrs_errors = tvd->vdev_scan_errors;
+		vrs->vrs_rate_avg = tvd->vdev_scan_rate_avg;
+		vrs->vrs_rate = tvd->vdev_scan_rate;
+		mutex_exit(&tvd->vdev_scan_lock);
+	}
+
+	return (0);
 }
 
-void
-spa_vdev_scan_destroy(spa_t *spa)
-{
-	spa_vdev_scan_t *svs = spa->spa_vdev_scan;
+/* BEGIN CSTYLED */
+ZFS_MODULE_PARAM(zfs_scan, zfs_scan_, extent_bytes_max, UINT, ZMOD_RW,
+    "Max size of scan I/Os, larger will be split");
 
-	if (svs == NULL)
-		return;
-
-	ASSERT3P(svs->svs_thread, ==, NULL);
-	ASSERT3P(svs->svs_ms_done, ==, NULL);
-	ASSERT3U(svs->svs_io_asize, ==, 0);
-
-	spa->spa_vdev_scan = NULL;
-	mutex_destroy(&svs->svs_lock);
-	cv_destroy(&svs->svs_cv);
-	mutex_destroy(&svs->svs_io_lock);
-	cv_destroy(&svs->svs_io_cv);
-	kmem_free(svs, sizeof (*svs));
-}
-
-void
-spa_vdev_scan_suspend(spa_t *spa)
-{
-	spa_vdev_scan_t *svs = spa->spa_vdev_scan;
-
-	if (svs == NULL)
-		return;
-
-	mutex_enter(&svs->svs_lock);
-	svs->svs_thread_exit = B_TRUE;
-	while (svs->svs_thread != NULL)
-		cv_wait(&svs->svs_cv, &svs->svs_lock);
-	mutex_exit(&svs->svs_lock);
-}
-
-void
-spa_vdev_scan_sync_state(spa_vdev_scan_t *svs, dmu_tx_t *tx)
-{
-	VERIFY0(zap_update(svs->svs_dp->dp_meta_objset,
-	    DMU_POOL_DIRECTORY_OBJECT,
-	    DMU_POOL_REBUILDING, sizeof (uint64_t),
-	    sizeof (spa_rebuilding_phys_t) / sizeof (uint64_t),
-	    &svs->svs_phys, tx));
-}
-
-int
-get_spa_vdev_scan_idle(void)
-{
-	return (spa_vdev_scan_idle);
-}
-
-#if defined(_KERNEL)
-module_param(spa_vdev_scan_delay, int, 0644);
-MODULE_PARM_DESC(spa_vdev_scan_delay, "Number of ticks to delay SPA rebuild");
-
-module_param(spa_vdev_scan_idle, int, 0644);
-MODULE_PARM_DESC(spa_vdev_scan_idle,
-	"Idle window in clock ticks for SPA rebuild");
-#endif
+ZFS_MODULE_PARAM(zfs_scan, zfs_scan_, queue_limit, UINT, ZMOD_RW,
+    "Max queued scan I/Os per top-level vdev");
+/* END CSTYLED */

@@ -125,6 +125,11 @@ extern "C" {
 #define	ESC_ZFS_TRIM_CANCEL		"trim_cancel"
 #define	ESC_ZFS_TRIM_RESUME		"trim_resume"
 #define	ESC_ZFS_TRIM_SUSPEND		"trim_suspend"
+#define	ESC_ZFS_SCAN_START		"scan_start"
+#define	ESC_ZFS_SCAN_FINISH		"scan_finish"
+#define	ESC_ZFS_SCAN_CANCEL		"scan_cancel"
+#define	ESC_ZFS_SCAN_RESUME		"scan_resume"
+#define	ESC_ZFS_SCAN_SUSPEND		"scan_suspend"
 
 /*
  * datalink subclass definitions.

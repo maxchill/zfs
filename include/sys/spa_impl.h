@@ -290,9 +290,9 @@ struct spa {
 	uint64_t	spa_scan_pass_issued;	/* issued bytes per pass */
 
 	/*
-	 * We are in the middle of a resilver, and another resilver
-	 * is needed once this one completes. This is set iff any
-	 * vdev_resilver_deferred is set.
+	 * We are in the middle of a resilver, and another resilver is needed
+	 * once this one completes. This is set iff any vdev_resilver_deferred
+	 * is set.  The same applies to spa_rebuild_deferred.
 	 */
 	boolean_t	spa_resilver_deferred;
 	kmutex_t	spa_async_lock;		/* protect async state */
@@ -312,8 +312,6 @@ struct spa {
 	uint64_t	spa_checkpoint_txg;	/* the txg of the checkpoint */
 	spa_checkpoint_info_t spa_checkpoint_info; /* checkpoint accounting */
 	zthr_t	*spa_checkpoint_discard_zthr;
-
-	spa_vdev_scan_t *spa_vdev_scan;
 
 	space_map_t	*spa_syncing_log_sm;	/* current log space map */
 	avl_tree_t	spa_sm_logs_by_txg;

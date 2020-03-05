@@ -541,7 +541,6 @@ vdev_alloc_common(spa_t *spa, uint_t id, uint64_t guid, vdev_ops_t *ops)
 	vd->vdev_state = VDEV_STATE_CLOSED;
 	vd->vdev_ishole = (ops == &vdev_hole_ops);
 	vd->vdev_cfg = NULL;
-	vd->vdev_last_io = 0;
 	vic->vic_prev_indirect_vdev = UINT64_MAX;
 
 	rw_init(&vd->vdev_indirect_rwlock, NULL, RW_DEFAULT, NULL);
@@ -3977,6 +3976,7 @@ vdev_get_stats_ex(vdev_t *vd, vdev_stat_t *vs, vdev_stat_ex_t *vsx)
 		vs->vs_timestamp = gethrtime() - vs->vs_timestamp;
 		vs->vs_state = vd->vdev_state;
 		vs->vs_rsize = vdev_get_min_asize(vd);
+
 		if (vd->vdev_ops->vdev_op_leaf) {
 			vs->vs_rsize += VDEV_LABEL_START_SIZE +
 			    VDEV_LABEL_END_SIZE;
@@ -4003,7 +4003,14 @@ vdev_get_stats_ex(vdev_t *vd, vdev_stat_t *vs, vdev_stat_ex_t *vsx)
 			vs->vs_trim_bytes_est = vd->vdev_trim_bytes_est;
 			vs->vs_trim_state = vd->vdev_trim_state;
 			vs->vs_trim_action_time = vd->vdev_trim_action_time;
+
+			/* Set when there is a deferred resilver/rebuild. */
+			if (vd->vdev_resilver_deferred)
+				vs->vs_resilver_deferred |= 0x01;
+			if (vd->vdev_rebuild_deferred)
+				vs->vs_resilver_deferred |= 0x02;
 		}
+
 		/*
 		 * Report expandable space on top-level, non-auxiliary devices
 		 * only. The expandable space is reported in terms of metaslab
@@ -4015,13 +4022,16 @@ vdev_get_stats_ex(vdev_t *vd, vdev_stat_t *vs, vdev_stat_ex_t *vsx)
 			    vd->vdev_max_asize - vd->vdev_asize,
 			    1ULL << tvd->vdev_ms_shift);
 		}
+
+		/*
+		 * Report fragmentation and rebuild progress for top-level,
+		 * non-auxiliary, concrete devices.
+		 */
 		if (vd->vdev_aux == NULL && vd == vd->vdev_top &&
 		    vdev_is_concrete(vd)) {
 			vs->vs_fragmentation = (vd->vdev_mg != NULL) ?
 			    vd->vdev_mg->mg_fragmentation : 0;
 		}
-		if (vd->vdev_ops->vdev_op_leaf)
-			vs->vs_resilver_deferred = vd->vdev_resilver_deferred;
 	}
 
 	vdev_get_stats_ex_impl(vd, vs, vsx);
@@ -4107,9 +4117,7 @@ vdev_stat_update(zio_t *zio, uint64_t psize)
 				    &spa->spa_dsl_pool->dp_scan->scn_phys;
 				uint64_t *processed = &scn_phys->scn_processed;
 
-				/* XXX cleanup? */
-				if (vd->vdev_ops->vdev_op_leaf &&
-				    vd->vdev_ops != &vdev_draid_spare_ops)
+				if (vd->vdev_ops->vdev_op_leaf)
 					atomic_add_64(processed, psize);
 				vs->vs_scan_processed += psize;
 			}
@@ -4184,7 +4192,7 @@ vdev_stat_update(zio_t *zio, uint64_t psize)
 	    type == ZIO_TYPE_WRITE && txg != 0 &&
 	    vd->vdev_ops != &vdev_draid_spare_ops &&
 	    (!(flags & ZIO_FLAG_IO_REPAIR) ||
-	    ((flags & ZIO_FLAG_SCAN_THREAD) && spa->spa_vdev_scan == NULL) ||
+	    (flags & ZIO_FLAG_SCAN_THREAD) ||
 	    spa->spa_claiming)) {
 		/*
 		 * This is either a normal write (not a repair), or it's

@@ -791,7 +791,7 @@ extern int bpobj_enqueue_free_cb(void *arg, const blkptr_t *bp, dmu_tx_t *tx);
 /* device manipulation */
 extern int spa_vdev_add(spa_t *spa, nvlist_t *nvroot);
 extern int spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot,
-    int replacing);
+    int replacing, int linear);
 extern int spa_vdev_detach(spa_t *spa, uint64_t guid, uint64_t pguid,
     int replace_done);
 extern int spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare);
@@ -800,6 +800,7 @@ extern int spa_vdev_initialize(spa_t *spa, nvlist_t *nv, uint64_t cmd_type,
     nvlist_t *vdev_errlist);
 extern int spa_vdev_trim(spa_t *spa, nvlist_t *nv, uint64_t cmd_type,
     uint64_t rate, boolean_t partial, boolean_t secure, nvlist_t *vdev_errlist);
+extern int spa_vdev_rebuild(spa_t *spa, uint64_t cmd_type, uint64_t rate);
 extern int spa_vdev_setpath(spa_t *spa, uint64_t guid, const char *newpath);
 extern int spa_vdev_setfru(spa_t *spa, uint64_t guid, const char *newfru);
 extern int spa_vdev_split_mirror(spa_t *spa, char *newname, nvlist_t *config,

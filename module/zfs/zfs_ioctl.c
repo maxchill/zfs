@@ -1942,6 +1942,7 @@ zfs_ioc_vdev_attach(zfs_cmd_t *zc)
 {
 	spa_t *spa;
 	int replacing = zc->zc_cookie;
+	int linear = zc->zc_simple;
 	nvlist_t *config;
 	int error;
 
@@ -1950,7 +1951,8 @@ zfs_ioc_vdev_attach(zfs_cmd_t *zc)
 
 	if ((error = get_nvlist(zc->zc_nvlist_conf, zc->zc_nvlist_conf_size,
 	    zc->zc_iflags, &config)) == 0) {
-		error = spa_vdev_attach(spa, zc->zc_guid, config, replacing);
+		error = spa_vdev_attach(spa, zc->zc_guid, config, replacing,
+		    linear);
 		nvlist_free(config);
 	}
 
@@ -4068,6 +4070,42 @@ zfs_ioc_wait(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
 
 	if (error == 0)
 		fnvlist_add_boolean_value(outnvl, ZPOOL_WAIT_WAITED, waited);
+
+	return (error);
+}
+
+/*
+ * innvl: {
+ *     "rebuild_command" -> POOL_REBUILD_{STOP|RESTART|PAUSE} (uint64)
+ *     "rebuild_rate" -> Target rebuild rate in bytes/sec.
+ * }
+ */
+static const zfs_ioc_key_t zfs_keys_pool_rebuild[] = {
+	{ZPOOL_REBUILD_COMMAND,	DATA_TYPE_UINT64,		0},
+	{ZPOOL_REBUILD_RATE,	DATA_TYPE_UINT64,		ZK_OPTIONAL},
+};
+
+static int
+zfs_ioc_rebuild(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
+{
+	uint64_t cmd_type;
+	if (nvlist_lookup_uint64(innvl, ZPOOL_REBUILD_COMMAND, &cmd_type) != 0)
+		return (SET_ERROR(EINVAL));
+
+	if (cmd_type >= POOL_REBUILD_FUNCS)
+		return (SET_ERROR(EINVAL));
+
+	uint64_t rate;
+	if (nvlist_lookup_uint64(innvl, ZPOOL_REBUILD_RATE, &rate) != 0)
+		rate = 0;
+
+	spa_t *spa;
+	int error = spa_open(name, &spa, FTAG);
+	if (error != 0)
+		return (error);
+
+	error = spa_vdev_rebuild(spa, cmd_type, rate);
+	spa_close(spa, FTAG);
 
 	return (error);
 }
@@ -6914,6 +6952,11 @@ zfs_ioctl_init(void)
 	    zfs_ioc_wait, zfs_secpolicy_none, POOL_NAME,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_FALSE, B_FALSE,
 	    zfs_keys_pool_wait, ARRAY_SIZE(zfs_keys_pool_wait));
+
+	zfs_ioctl_register("rebuild", ZFS_IOC_POOL_REBUILD,
+	    zfs_ioc_rebuild, zfs_secpolicy_config, POOL_NAME,
+	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_FALSE, B_TRUE,
+	    zfs_keys_pool_rebuild, ARRAY_SIZE(zfs_keys_pool_rebuild));
 
 	/* IOCTLS that use the legacy function signature */
 

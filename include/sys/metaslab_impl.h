@@ -423,7 +423,6 @@ struct metaslab {
 	boolean_t	ms_loading;
 	kcondvar_t	ms_flush_cv;
 	boolean_t	ms_flushing;
-	boolean_t	ms_rebuilding;
 
 	/*
 	 * The following histograms count entries that are in the

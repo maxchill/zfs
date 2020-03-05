@@ -64,10 +64,11 @@ typedef struct dsl_scan_phys {
 	uint64_t scn_ddt_class_max;
 	ddt_bookmark_t scn_ddt_bookmark;
 	zbookmark_phys_t scn_bookmark;
-	uint64_t scn_flags; /* dsl_scan_flags_t */
+	uint64_t scn_flags;	/* dsl_scan_flags_t */
 } dsl_scan_phys_t;
 
 #define	SCAN_PHYS_NUMINTS (sizeof (dsl_scan_phys_t) / sizeof (uint64_t))
+CTASSERT_GLOBAL(sizeof (dsl_scan_phys_t) == 24 * sizeof (uint64_t));
 
 typedef enum dsl_scan_flags {
 	DSF_VISIT_DS_AGAIN = 1<<0,
@@ -129,6 +130,7 @@ typedef struct dsl_scan {
 	/* members for thread synchronization */
 	zio_t *scn_zio_root;		/* root zio for waiting on IO */
 	taskq_t *scn_taskq;		/* task queue for issuing extents */
+	list_t *scn_rebuild_list;	/* top-level vdevs rebuilding */
 
 	/* for controlling scan prefetch, protected by spa_scrub_lock */
 	boolean_t scn_prefetch_stop;	/* prefetch should stop */

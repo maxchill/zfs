@@ -64,6 +64,7 @@ enum scope_prefix_types {
 	zfs_prefetch,
 	zfs_reconstruct,
 	zfs_recv,
+	zfs_scan,
 	zfs_send,
 	zfs_spa,
 	zfs_trim,

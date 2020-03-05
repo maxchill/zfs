@@ -27,7 +27,6 @@
 #include <sys/spa_impl.h>
 #include <sys/vdev_impl.h>
 #include <sys/vdev_draid_impl.h>
-#include <sys/dsl_scan.h>
 #include <sys/vdev_scan.h>
 #include <sys/abd.h>
 #include <sys/zio.h>
@@ -1171,8 +1170,7 @@ vdev_draid_io_start(zio_t *zio)
 	 * rm->rm_nskip must be 0
 	 */
 	ASSERT((zio->io_flags & ZIO_FLAG_RESILVER) == 0 ||
-	    !DSL_SCAN_IS_REBUILD(zio->io_spa->spa_dsl_pool->dp_scan) ||
-	    rm->rm_nskip == 0);
+	    !vdev_scan_rebuilding(vd->vdev_top) || rm->rm_nskip == 0);
 
 	/*
 	 * Iterate over the columns in reverse order so that we hit the parity

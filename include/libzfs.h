@@ -276,6 +276,14 @@ typedef struct trimflags {
 	uint64_t rate;
 } trimflags_t;
 
+typedef struct rebuildflags {
+	/* block until rebuild completes */
+	boolean_t wait;
+
+	/* rebuild at the requested rate in bytes/second */
+	uint64_t rate;
+} rebuildflags_t;
+
 /*
  * Functions to manipulate pool and vdev state
  */
@@ -286,6 +294,8 @@ extern int zpool_initialize_wait(zpool_handle_t *, pool_initialize_func_t,
     nvlist_t *);
 extern int zpool_trim(zpool_handle_t *, pool_trim_func_t, nvlist_t *,
     trimflags_t *);
+extern int zpool_rebuild(zpool_handle_t *, pool_rebuild_func_t,
+    rebuildflags_t *);
 
 extern int zpool_clear(zpool_handle_t *, const char *, nvlist_t *);
 extern int zpool_reguid(zpool_handle_t *);
@@ -297,7 +307,7 @@ extern int zpool_vdev_online(zpool_handle_t *, const char *, int,
     vdev_state_t *);
 extern int zpool_vdev_offline(zpool_handle_t *, const char *, boolean_t);
 extern int zpool_vdev_attach(zpool_handle_t *, const char *,
-    const char *, nvlist_t *, int);
+    const char *, nvlist_t *, int, boolean_t);
 extern int zpool_vdev_detach(zpool_handle_t *, const char *);
 extern int zpool_vdev_remove(zpool_handle_t *, const char *);
 extern int zpool_vdev_remove_cancel(zpool_handle_t *);

@@ -3688,27 +3688,6 @@ zio_vdev_io_start(zio_t *zio)
 		}
 	}
 
-	/*
-	 * We keep track of time-sensitive I/Os so that the scan thread
-	 * can quickly react to certain workloads.  In particular, we care
-	 * about non-scrubbing, top-level reads and writes with the following
-	 * characteristics:
-	 *	- synchronous/async writes of user data to non-slog devices
-	 *	- any reads of user data
-	 * When these conditions are met, adjust the timestamp of vdev_last_io
-	 * which allows the scan thread to adjust its workload accordingly.
-	 */
-	if (!(zio->io_flags & ZIO_FLAG_SCAN_THREAD) && zio->io_bp != NULL &&
-	    !vd->vdev_islog && zio->io_bookmark.zb_objset != DMU_META_OBJSET) {
-		vdev_t *tvd = vd->vdev_top;
-		uint64_t old = tvd->vdev_last_io;
-		uint64_t new = ddi_get_lbolt64();
-		int spa_vdev_scan_idle = get_spa_vdev_scan_idle();
-
-		if (new > old + spa_vdev_scan_idle/2)
-			(void) atomic_cas_64(&tvd->vdev_last_io, old, new);
-	}
-
 	align = 1ULL << vd->vdev_top->vdev_ashift;
 
 	if (!(zio->io_flags & ZIO_FLAG_PHYSICAL) &&

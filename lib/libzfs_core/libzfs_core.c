@@ -1621,3 +1621,24 @@ lzc_wait_tag(const char *pool, zpool_wait_activity_t activity, uint64_t tag,
 {
 	return (wait_common(pool, activity, B_TRUE, tag, waited));
 }
+
+/*
+ * Changes rebuild state.
+ */
+int
+lzc_rebuild(const char *poolname, pool_rebuild_func_t cmd_type, uint64_t rate)
+{
+	nvlist_t *args = fnvlist_alloc();
+	nvlist_t *result = NULL;
+
+	int error;
+
+	fnvlist_add_uint64(args, ZPOOL_REBUILD_COMMAND, (uint64_t)cmd_type);
+	fnvlist_add_uint64(args, ZPOOL_REBUILD_RATE, rate);
+
+	error = lzc_ioctl(ZFS_IOC_POOL_REBUILD, poolname, args, &result);
+
+	fnvlist_free(args);
+
+	return (error);
+}

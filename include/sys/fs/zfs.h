@@ -725,6 +725,7 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_MMP_HOSTID		"mmp_hostid"	/* not stored on disk */
 #define	ZPOOL_CONFIG_ALLOCATION_BIAS	"alloc_bias"	/* not stored on disk */
 #define	ZPOOL_CONFIG_EXPANSION_TIME	"expansion_time"	/* not stored */
+#define	ZPOOL_CONFIG_REBUILD_STATS	"org.openzfs:rebuild_stats"
 #define	ZPOOL_CONFIG_DRAIDCFG		"org.openzfs:draid_config"
 
 /*
@@ -794,6 +795,24 @@ typedef struct zpool_load_policy {
 #define	VDEV_ALLOC_BIAS_LOG		"log"
 #define	VDEV_ALLOC_BIAS_SPECIAL		"special"
 #define	VDEV_ALLOC_BIAS_DEDUP		"dedup"
+
+/* vdev scan state (dRAID/mirror rebuild) */
+#define	VDEV_TOP_ZAP_SCAN_LAST_OFFSET \
+	"org.openzfs:next_offset_to_scan"
+#define	VDEV_TOP_ZAP_SCAN_STATE \
+	"org.openzfs:vdev_scan_state"
+#define	VDEV_TOP_ZAP_SCAN_START_TIME \
+	"org.openzfs:vdev_scan_start_time"
+#define	VDEV_TOP_ZAP_SCAN_END_TIME \
+	"org.openzfs:vdev_scan_end_time"
+#define	VDEV_TOP_ZAP_SCAN_ACTION_TIME \
+	"org.openzfs:vdev_scan_action_time"
+#define	VDEV_TOP_ZAP_SCAN_RATE \
+	"org.openzfs:vdev_scan_rate"
+#define	VDEV_TOP_ZAP_SCAN_FAULT_GUIDS \
+	"org.openzfs:vdev_scan_fault_guids"
+#define	VDEV_TOP_ZAP_SCAN_DEFER_GUIDS \
+	"org.openzfs:vdev_scan_defer_guids"
 
 /* vdev initialize state */
 #define	VDEV_LEAF_ZAP_INITIALIZE_LAST_OFFSET	\
@@ -913,7 +932,6 @@ typedef enum pool_scan_func {
 	POOL_SCAN_NONE,
 	POOL_SCAN_SCRUB,
 	POOL_SCAN_RESILVER,
-	POOL_SCAN_REBUILD, /* sequential SPA scan */
 	POOL_SCAN_FUNCS
 } pool_scan_func_t;
 
@@ -1000,6 +1018,18 @@ typedef enum dsl_scan_state {
 	DSS_CANCELED,
 	DSS_NUM_STATES
 } dsl_scan_state_t;
+
+typedef struct vdev_rebuild_stat {
+	uint64_t vrs_state;		/* vdev_scan_state_t */
+	uint64_t vrs_start_time;	/* time_t */
+	uint64_t vrs_end_time;		/* time_t */
+	uint64_t vrs_action_time;	/* time_t */
+	uint64_t vrs_bytes_done;	/* bytes rebuilt */
+	uint64_t vrs_bytes_est;		/* total bytes to rebuild */
+	uint64_t vrs_errors;		/* scanning errors */
+	uint64_t vrs_rate_avg;		/* observed average rebuild rate */
+	uint64_t vrs_rate;		/* requested rate (bytes/sec) */
+} vdev_rebuild_stat_t;
 
 /*
  * Errata described by https://zfsonlinux.org/msg/ZFS-8000-ER.  The ordering
@@ -1132,6 +1162,17 @@ typedef enum pool_trim_func {
 } pool_trim_func_t;
 
 /*
+ * Rebuild functions.
+ */
+typedef enum pool_rebuild_func {
+	POOL_REBUILD_RESTART,
+	POOL_REBUILD_CANCEL,
+	POOL_REBUILD_SUSPEND,
+	POOL_REBUILD_SET_RATE,
+	POOL_REBUILD_FUNCS
+} pool_rebuild_func_t;
+
+/*
  * DDT statistics.  Note: all fields should be 64-bit because this
  * is passed between kernel and userland as an nvlist uint64 array.
  */
@@ -1191,6 +1232,14 @@ typedef enum {
 	VDEV_TRIM_COMPLETE,
 } vdev_trim_state_t;
 
+typedef enum {
+	VDEV_SCAN_NONE,
+	VDEV_SCAN_ACTIVE,
+	VDEV_SCAN_CANCELED,
+	VDEV_SCAN_SUSPENDED,
+	VDEV_SCAN_COMPLETE,
+} vdev_scan_state_t;
+
 /*
  * nvlist name constants. Facilitate restricting snapshot iteration range for
  * the "list next snapshot" ioctl
@@ -1205,7 +1254,7 @@ typedef enum {
  */
 typedef enum zfs_ioc {
 	/*
-	 * Core features - 81/128 numbers reserved.
+	 * Core features - 82/128 numbers reserved.
 	 */
 #ifdef __FreeBSD__
 	ZFS_IOC_FIRST =	0,
@@ -1297,6 +1346,7 @@ typedef enum zfs_ioc {
 	ZFS_IOC_REDACT,				/* 0x5a51 */
 	ZFS_IOC_GET_BOOKMARK_PROPS,		/* 0x5a52 */
 	ZFS_IOC_WAIT,				/* 0x5a53 */
+	ZFS_IOC_POOL_REBUILD,			/* 0x5a54 */
 
 	/*
 	 * Per-platform (Optional) - 6/128 numbers reserved.
@@ -1370,6 +1420,7 @@ typedef enum {
 	ZPOOL_WAIT_RESILVER,
 	ZPOOL_WAIT_SCRUB,
 	ZPOOL_WAIT_TRIM,
+	ZPOOL_WAIT_REBUILD,
 	ZPOOL_WAIT_NUM_ACTIVITIES
 } zpool_wait_activity_t;
 
@@ -1429,6 +1480,12 @@ typedef enum {
 #define	ZPOOL_WAIT_ACTIVITY		"wait_activity"
 #define	ZPOOL_WAIT_TAG			"wait_tag"
 #define	ZPOOL_WAIT_WAITED		"wait_waited"
+
+/*
+ * The following are names used when invoking ZFS_IOC_POOL_REBUILD.
+ */
+#define	ZPOOL_REBUILD_COMMAND		"rebuild_command"
+#define	ZPOOL_REBUILD_RATE		"rebuild_rate"
 
 /*
  * Flags for ZFS_IOC_VDEV_SET_STATE

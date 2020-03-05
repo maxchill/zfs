@@ -25,51 +25,19 @@
 #ifndef	_SYS_VDEV_SCAN_H
 #define	_SYS_VDEV_SCAN_H
 
-#include <sys/types.h>
 #include <sys/spa.h>
-#include <sys/dsl_pool.h>
-#include <sys/dmu.h>
 
 #ifdef	__cplusplus
 extern "C" {
 #endif
 
-typedef struct spa_rebuilding_phys {
-	uint64_t sr_vdev;
-	uint64_t sr_oldvd;
-	int64_t	 sr_ms;
-} spa_rebuilding_phys_t;
-
-typedef struct spa_vdev_scan {
-	dsl_pool_t	*svs_dp;
-	vdev_t		*svs_vd;
-	kthread_t	*svs_thread;
-	kmutex_t	svs_lock;
-	kcondvar_t	svs_cv;
-	boolean_t	svs_thread_exit;
-	uint64_t	svs_dtl_max;
-	int		svs_msi;
-	int		svs_msi_synced;
-	int		*svs_ms_done;
-
-	kmutex_t	svs_io_lock;
-	kcondvar_t	svs_io_cv;
-	uint64_t	svs_io_asize;
-
-	spa_rebuilding_phys_t svs_phys;
-} spa_vdev_scan_t;
-
-extern void spa_vdev_scan_setup_sync(dmu_tx_t *);
-extern void spa_vdev_scan_start(spa_t *, vdev_t *, int, uint64_t);
-extern int spa_vdev_scan_restart(vdev_t *);
-extern int spa_vdev_scan_rebuild_cb(dsl_pool_t *,
-    const blkptr_t *, const zbookmark_phys_t *);
-extern void spa_vdev_scan_suspend(spa_t *);
-extern void spa_vdev_scan_destroy(spa_t *);
-extern void spa_vdev_scan_sync_state(spa_vdev_scan_t *, dmu_tx_t *);
-
-#define	DSL_SCAN_IS_REBUILD(scn) ((scn)->scn_phys.scn_func == POOL_SCAN_REBUILD)
-
+boolean_t vdev_scan_rebuilding(vdev_t *);
+boolean_t vdev_scan_suspended(vdev_t *);
+void vdev_scan_rebuild(vdev_t *, vdev_t *, boolean_t);
+void vdev_scan_set_rate(vdev_t *, uint64_t);
+void vdev_scan_restart(vdev_t *, boolean_t);
+void vdev_scan_stop_wait(vdev_t *, vdev_scan_state_t);
+int vdev_scan_get_stats(vdev_t *, vdev_rebuild_stat_t *);
 
 #ifdef	__cplusplus
 }

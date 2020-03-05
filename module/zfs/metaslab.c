@@ -4623,7 +4623,6 @@ metaslab_block_alloc(metaslab_t *msp, uint64_t psize, uint64_t *sizep,
 	ASSERT(MUTEX_HELD(&msp->ms_lock));
 	VERIFY(!msp->ms_condensing);
 	VERIFY0(msp->ms_disabled);
-	VERIFY(!msp->ms_rebuilding);
 
 	start = mc->mc_ops->msop_alloc(msp, psize, &size);
 	ASSERT3U(size, <=, *sizep);
@@ -4692,10 +4691,8 @@ find_valid_metaslab(metaslab_group_t *mg, uint64_t activation_weight,
 		 * If the selected metaslab is condensing or disabled,
 		 * skip it.
 		 */
-		if (msp->ms_condensing || msp->ms_disabled > 0 ||
-		    msp->ms_rebuilding) {
+		if (msp->ms_condensing || msp->ms_disabled > 0)
 			continue;
-		}
 
 		*was_active = msp->ms_allocator != -1;
 		/*
@@ -4963,7 +4960,7 @@ metaslab_group_alloc_normal(metaslab_group_t *mg, zio_alloc_list_t *zal,
 		 * allocate from it since the allocated region might be
 		 * overwritten after allocation.
 		 */
-		if (msp->ms_condensing || msp->ms_rebuilding) {
+		if (msp->ms_condensing) {
 			metaslab_trace_add(zal, mg, msp, asize, d,
 			    TRACE_CONDENSING, allocator);
 			if (activated) {
