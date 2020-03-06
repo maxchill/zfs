@@ -82,7 +82,7 @@ vdev_draid_config_validate(nvlist_t *config,
 	if (nvlist_lookup_uint64(config, ZPOOL_CONFIG_DRAIDCFG_SPARES, &s))
 		return (DRAIDCFG_ERR_SPARES_MISSING);
 
-	if (s == 0 || s > VDEV_DRAID_MAX_SPARES || s >= (n - (g * (p + 1))))
+	if (s == 0 || s > VDEV_DRAID_MAX_SPARES || s > (n - (g * (p + 1))))
 		return (DRAIDCFG_ERR_SPARES_INVALID);
 
 	if (required_spares != 0 && s != required_spares)
@@ -1091,7 +1091,7 @@ vdev_draid_config_generate(uint64_t groups, uint64_t data, uint64_t parity,
 	 * the requested number of spares can be satisfied.
 	 */
 	if (spares == 0 || spares > VDEV_DRAID_MAX_SPARES ||
-	    spares >= (children - (groups * (parity + 1)))) {
+	    spares > (children - (groups * (parity + 1)))) {
 		return (DRAIDCFG_ERR_SPARES_INVALID);
 	}
 
