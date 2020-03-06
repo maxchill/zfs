@@ -1461,53 +1461,9 @@ vdev_draid_config_print_error(draidcfg_err_t error)
 		break;
 	}
 }
-
-/*
- * Print the provided dDRAID configuration, or a descriptive error
- * message if configuration cannot be validated.
- */
-void
-vdev_draid_config_print(nvlist_t *cfg)
-{
-	draidcfg_err_t error = vdev_draid_config_validate(cfg, 0, 0, 0, 0);
-	if (error != DRAIDCFG_OK) {
-		vdev_draid_config_print_error(error);
-		return;
-	}
-
-	uint64_t n = fnvlist_lookup_uint64(cfg, ZPOOL_CONFIG_DRAIDCFG_CHILDREN);
-	uint64_t g = fnvlist_lookup_uint64(cfg, ZPOOL_CONFIG_DRAIDCFG_GROUPS);
-	uint64_t p = fnvlist_lookup_uint64(cfg, ZPOOL_CONFIG_DRAIDCFG_PARITY);
-	uint64_t s = fnvlist_lookup_uint64(cfg, ZPOOL_CONFIG_DRAIDCFG_SPARES);
-	uint64_t b = fnvlist_lookup_uint64(cfg, ZPOOL_CONFIG_DRAIDCFG_BASE);
-
-	uint8_t *value = NULL;
-	uint_t count = 0;
-
-	printf("draid%lu vdev of %lu child drives"
-	    " in %lu groups with %lu distributed spares\n", p, n, g, s);
-	VERIFY0(nvlist_lookup_uint8_array(cfg,
-	    ZPOOL_CONFIG_DRAIDCFG_DATA, &value, &count));
-	for (int i = 0; i < g; i++)
-		printf(" (%u + %lu)\n", value[i], p);
-
-	printf("Using %lu base permutation%s\n", b, b > 1 ? "s" : "");
-	VERIFY0(nvlist_lookup_uint8_array(cfg,
-	    ZPOOL_CONFIG_DRAIDCFG_PERM, &value, &count));
-
-	for (int i = 0; i < b; i++) {
-		printf("  ");
-		for (int j = 0; j < n; j++)
-			printf("%*u,", n > 99 ? 3 : 2, value[i * n + j]);
-		printf("\n");
-	}
-}
-
 #endif /* _KERNEL */
 
-#if defined(_KERNEL)
 EXPORT_SYMBOL(vdev_draid_config_validate);
 EXPORT_SYMBOL(vdev_draid_spare_name);
 EXPORT_SYMBOL(vdev_draid_spare_values);
 EXPORT_SYMBOL(vdev_draid_is_spare);
-#endif
