@@ -1470,7 +1470,7 @@ void
 vdev_draid_config_print(nvlist_t *cfg)
 {
 	draidcfg_err_t error = vdev_draid_config_validate(cfg, 0, 0, 0, 0);
-	if (cfg != DRAIDCFG_OK) {
+	if (error != DRAIDCFG_OK) {
 		vdev_draid_config_print_error(error);
 		return;
 	}
