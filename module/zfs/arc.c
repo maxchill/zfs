@@ -5728,7 +5728,6 @@ top:
 		 * Gracefully handle a damaged logical block size as a
 		 * checksum error.
 		 */
-		ASSERT3U(lsize, <=, spa_maxblocksize);
 		if (lsize > spa_maxblocksize(spa)) {
 			rc = SET_ERROR(ECKSUM);
 			if (hash_lock != NULL)
